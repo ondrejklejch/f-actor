@@ -343,10 +343,10 @@ class DSUModel(ModelInitializerLoader):
             attention_mask[i, : seq.size(0)] = 1
 
         labels_all_dsu_heads = pad_sequence(
-            labels_all_dsu_heads,
+            [x.transpose(1, 0) for x in labels_all_dsu_heads],  # pad_sequence expects [L, H]
             batch_first=True,
             padding_value=self.pad_token_id,
-        )  # [B, H, L]
+        ).transpose(2, 1)  # [B, H, L]
 
         if labels_all_text_streams:
             labels_all_text_streams = pad_sequence(
@@ -512,11 +512,11 @@ class DSUModel(ModelInitializerLoader):
         )
 
         labels_all_dsu_heads = pad_sequence(
-            labels_all_dsu_heads,
+            [x.transpose(1, 0) for x in labels_all_dsu_heads],  # pad_sequence expects [L, H]
             batch_first=True,
             padding_value=self.pad_token_id,
             padding_side="right",
-        )  # [B, H, L]
+        ).transpose(2, 1)  # [B, H, L]
 
         if labels_all_text_streams:
 
