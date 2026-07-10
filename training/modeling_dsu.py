@@ -120,12 +120,12 @@ class DSUModel(ModelInitializerLoader):
             audio_hidden_padded = hidden_states[:, -1:, :]
         else:
             # only get audio hidden states and repad
-            prompt_lens = (
-                prompt_dsu_attention_mask.sum(dim=1)
-                - (dsu_labels != self.pad_token_id).sum(dim=-1)[:, 0]
-            )
+            total_lens = prompt_dsu_attention_mask.sum(dim=1)
+            prompt_lens = total_lens - (dsu_labels != self.pad_token_id).sum(dim=-1)[:, 0]
 
-            audio_hidden = [hidden_states[b, prompt_lens[b] :, :] for b in range(B)]
+            audio_hidden = [
+                hidden_states[b, prompt_lens[b] : total_lens[b], :] for b in range(B)
+            ]
 
             audio_hidden_padded = pad_sequence(
                 audio_hidden, batch_first=True, padding_value=0.0
