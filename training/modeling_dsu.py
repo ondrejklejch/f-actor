@@ -350,10 +350,10 @@ class DSUModel(ModelInitializerLoader):
 
         if labels_all_text_streams:
             labels_all_text_streams = pad_sequence(
-                labels_all_text_streams,
+                [x.transpose(1, 0) for x in labels_all_text_streams],  # pad_sequence expects [L, H]
                 batch_first=True,
                 padding_value=self.pad_token_id,
-            )
+            ).transpose(2, 1)  # [B, H, L]
         else:
             labels_all_text_streams = None
 
