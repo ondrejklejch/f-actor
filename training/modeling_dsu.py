@@ -681,7 +681,7 @@ class DSUModel(ModelInitializerLoader):
 
         dsu_logits = self.dsu_head(hidden_state_last).view(
             hidden_state_last.shape[0], self.num_dsu_heads, -1
-        )
+        )[:, :self.dsus]
         return sample_fn(dsu_logits)
 
     @torch.no_grad()
@@ -715,12 +715,6 @@ class DSUModel(ModelInitializerLoader):
         talk_to_itself = kwargs.pop("talk_to_itself", True)
         spk_emb = kwargs.pop("spk_emb", None)
 
-        if self.use_depth_decoder and talk_to_itself:
-            raise ValueError(
-                "use_depth_decoder only predicts the first speaker's dsus and "
-                "cannot be used with talk_to_itself=True."
-            )
-
         if self.text_stream and text_sample is not None and dsu_sample is None:
             raise ValueError("Need to add dsu sample if you want text sample!")
 
@@ -744,9 +738,8 @@ class DSUModel(ModelInitializerLoader):
 
         B = dsu_sample.size(0)
 
-        # Initialize per-head DSU sequences
         generated_dsu = torch.full(
-            (B, self.num_dsu_heads, max_length),
+            (B, 2 * self.num_dsus, max_length),
             self.pad_token_id,
             device=input_ids.device,
             dtype=torch.long,
@@ -816,7 +809,7 @@ class DSUModel(ModelInitializerLoader):
             past_key_values = outputs["past_key_values"]
 
             if step >= n_delay_audio_stream:
-                generated_dsu[:, :, step] = self.sample_dsu_tokens(
+                generated_dsu[:, :self.num_dsus, step] = self.sample_dsu_tokens(
                     outputs, do_sample, temperature, top_k, top_p
                 )
             else:
