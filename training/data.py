@@ -154,7 +154,7 @@ def load_speech_data(
                 if data_args.train_on_subset
                 else 30
             )
-            data_split = data_split.shuffle(seed=42).select(range(subset_size))
+            data_split = data_split.take(subset_size)
 
         data_split = data_split.map(
             tokenize_speech,
