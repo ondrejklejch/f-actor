@@ -183,6 +183,11 @@ class DSUModel(ModelInitializerLoader):
 
                 if loss_type == "dsus":
                     if self.use_depth_decoder:
+                        # labels_shifted carries both speakers' channels (input
+                        # is always 2 * num_dsus wide); the depth decoder only
+                        # ever predicts the first speaker's num_dsus codebooks,
+                        # so restrict its teacher-forcing input to those.
+                        labels_shifted = labels_shifted[:, : self.num_dsus, :]
                         logits = self.depth_decoder_head(
                             audio_hidden_padded, labels_shifted
                         )
@@ -309,7 +314,7 @@ class DSUModel(ModelInitializerLoader):
             dsu_embeds = torch.stack(
                 [
                     audio_embedding_lookup[h](dsu_ids_b[h])  # per head embedding
-                    for h in range(self.num_dsu_heads)
+                    for h in range(len(self.audio_embeds))
                 ],
                 dim=0,
             )
@@ -464,7 +469,7 @@ class DSUModel(ModelInitializerLoader):
             dsu_embeds = torch.stack(
                 [
                     audio_embedding_lookup[h](dsu_ids_b[h])  # per head embedding
-                    for h in range(self.num_dsu_heads)
+                    for h in range(len(self.audio_embeds))
                 ],
                 dim=0,
             )
