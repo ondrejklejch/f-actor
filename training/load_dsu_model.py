@@ -25,6 +25,45 @@ class ModelInitializerLoader:
         else:
             self.init_audio_embeds()
 
+    def init_or_load_depth_decoder_head(self, model_path=None):
+        if self.num_dsus < 1:
+            return
+
+        from depth_decoder_head import CsmDepthDecoderHead
+
+        self.num_dsu_heads = self.num_dsus
+        self.depth_decoder_head = CsmDepthDecoderHead(
+            hidden_size=self.hidden_size,
+            audio_vocab_size=self.audio_vocab_size,
+            num_dsus=self.num_dsus,
+            pretrained_path=self.depth_decoder_pretrained_path,
+        )
+
+        if self.checkpoint_has_weights(model_path, "depth_decoder_head.semantic_head"):
+            state_dict = self.load_safetensors_state_dict(model_path)
+            for key in [
+                "depth_decoder_head.semantic_head.weight",
+                "depth_decoder_head.semantic_head.bias",
+                "depth_decoder_head.backbone_adapter.weight",
+            ]:
+                if key not in state_dict:
+                    raise KeyError(f"Missing key '{key}' in checkpoint {model_path}")
+
+            self.depth_decoder_head.semantic_head.weight.data.copy_(
+                state_dict["depth_decoder_head.semantic_head.weight"]
+            )
+            self.depth_decoder_head.semantic_head.bias.data.copy_(
+                state_dict["depth_decoder_head.semantic_head.bias"]
+            )
+            self.depth_decoder_head.backbone_adapter.weight.data.copy_(
+                state_dict["depth_decoder_head.backbone_adapter.weight"]
+            )
+            # depth_decoder.* weights are always taken fresh from the pretrained,
+            # frozen checkpoint above - they are never fine-tuned, so there is no
+            # need to load them again from our own training checkpoint.
+
+        self.depth_decoder_head.to(self.device)
+
     def init_or_load_text_heads(self, model_path=None):
         if not self.multi_text_stream:
             return
