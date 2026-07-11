@@ -150,7 +150,7 @@ class ModelInitializerLoader:
         if self.num_dsus < 1:
             return
 
-        self.num_audio_embeds = self.num_dsu_heads
+        self.num_audio_embeds = self.num_dsus * 2
 
         # One embedding table per head
         self.audio_embeds = torch.nn.ModuleList(
