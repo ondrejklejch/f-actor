@@ -238,7 +238,7 @@ class DSUModel(ModelInitializerLoader):
                     raise NotImplementedError
 
             if not inference and total_loss is not None:
-                total_loss = total_loss / self.grad_acc_steps
+                total_loss = total_loss
 
         return {
             "loss": total_loss,
