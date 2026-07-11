@@ -23,6 +23,18 @@ class DSUModel(ModelInitializerLoader):
         self.text_padding_weight = getattr(config, "text_padding_weight", 1.0)
         self.text_padding_ids = []  # set externally once text-stream tokens exist
 
+        self.use_depth_decoder = getattr(config, "use_depth_decoder", False)
+        self.depth_decoder_pretrained_path = getattr(
+            config, "depth_decoder_pretrained_path", "sesame/csm-1b"
+        )
+        self.depth_decoder_head = None  # initialized later (if use_depth_decoder)
+
+        if self.use_depth_decoder and not self.calc_loss_on_c1_only:
+            raise ValueError(
+                "use_depth_decoder requires calc_loss_on_c1_only=True: the pretrained "
+                "depth decoder only ever predicts the first speaker's dsus."
+            )
+
         # vocab sizes for text and audio
         self.text_vocab_size = self.get_output_embeddings().weight.size(0)
         self.audio_vocab_size = config.audio_vocab_size + 2
@@ -136,14 +148,16 @@ class DSUModel(ModelInitializerLoader):
 
         B, L, _ = audio_hidden_padded.shape
 
-        # feed hiddens through heads
-
-        dsu_logits = self.dsu_head(audio_hidden_padded).view(
-            B, L, self.num_dsu_heads, -1
-        )
-
+        # dsu logits are only computed when a loss is actually needed - during
+        # generation, sample_dsu_tokens() calls the relevant head directly
+        # instead - and, for both head types, lazily below inside the per-type
+        # loop, once labels_shifted (the target-frame-aligned labels) is
+        # available. use_depth_decoder needs that exact shifted tensor as its
+        # own teacher-forcing input, so we compute the shift once and reuse it
+        # instead of shifting twice; dsu_head doesn't need labels at all, but is
+        # computed in the same place for symmetry/consistency.
         logits_labels_pairs = [
-            (dsu_logits, dsu_labels, "dsus"),
+            (None, dsu_labels, "dsus"),
         ]
 
         if self.multi_text_stream:
@@ -164,12 +178,26 @@ class DSUModel(ModelInitializerLoader):
             total_loss, c1_dsu_loss, c1_text_loss = 0, 0, 0
 
             for logits, labels, loss_type in logits_labels_pairs:
-
                 labels_padded = F.pad(labels, (0, 1), value=self.pad_token_id)
                 labels_shifted = labels_padded[..., 1:].contiguous()
 
+                if loss_type == "dsus":
+                    if self.use_depth_decoder:
+                        logits = self.depth_decoder_head(
+                            audio_hidden_padded, labels_shifted
+                        )
+                    else:
+                        logits = self.dsu_head(audio_hidden_padded).view(
+                            B, L, self.num_dsu_heads, -1
+                        )
+
+                # dsus are already restricted to the first speaker above when
+                # use_depth_decoder, so they must not be halved again here.
+                already_c1_only = loss_type == "dsus" and self.use_depth_decoder
+
                 if (
-                    not self.model.training or self.calc_loss_on_c1_only
+                    not already_c1_only
+                    and (not self.model.training or self.calc_loss_on_c1_only)
                 ):  # only care about speaker 1 ppl
                     labels_shifted = labels_shifted[
                         :, : max(1, labels_shifted.shape[1] // 2), :
@@ -212,9 +240,9 @@ class DSUModel(ModelInitializerLoader):
             "loss": total_loss,
             "c1_text_loss": c1_text_loss,
             "c1_dsu_loss": c1_dsu_loss,
-            "logits": dsu_logits,
             "ts_logits": ts_logits,
             "past_key_values": past_key_values,
+            "audio_hidden_last": audio_hidden_padded[:, -1, :],
         }
 
     def check_vocab_bounds(self, prompt_ids, dsu_ids):
@@ -636,6 +664,28 @@ class DSUModel(ModelInitializerLoader):
         return next_tokens
 
     @torch.no_grad()
+    def sample_dsu_tokens(self, outputs, do_sample, temperature, top_k, top_p):
+        """
+        Sample this step's dsu ids from a forward() call made with need_loss=False.
+        Head-agnostic: dispatches to the frozen depth decoder's own generate()
+        (which also samples the semantic id) or the flat dsu_head, whichever is
+        active.
+
+        Returns ids of shape [B, num_dsu_heads].
+        """
+        hidden_state_last = outputs["audio_hidden_last"]
+        sample_fn = lambda logits: self.get_next_tokens(
+            logits.shape[0], logits, do_sample, temperature, top_k, top_p
+        )
+        if self.use_depth_decoder:
+            return self.depth_decoder_head.generate(hidden_state_last, sample_fn)
+
+        dsu_logits = self.dsu_head(hidden_state_last).view(
+            hidden_state_last.shape[0], self.num_dsu_heads, -1
+        )
+        return sample_fn(dsu_logits)
+
+    @torch.no_grad()
     def generate(
         self,
         input_ids,
@@ -665,6 +715,12 @@ class DSUModel(ModelInitializerLoader):
         n_delay_text_stream = kwargs.pop("n_delay_text_stream", 0)
         talk_to_itself = kwargs.pop("talk_to_itself", True)
         spk_emb = kwargs.pop("spk_emb", None)
+
+        if self.use_depth_decoder and talk_to_itself:
+            raise ValueError(
+                "use_depth_decoder only predicts the first speaker's dsus and "
+                "cannot be used with talk_to_itself=True."
+            )
 
         if self.text_stream and text_sample is not None and dsu_sample is None:
             raise ValueError("Need to add dsu sample if you want text sample!")
@@ -759,11 +815,10 @@ class DSUModel(ModelInitializerLoader):
             )
 
             past_key_values = outputs["past_key_values"]
-            dsu_logits = outputs["logits"][:, -1, :, :]  # [B, L_total, H,  V]
 
             if step >= n_delay_audio_stream:
-                generated_dsu[:, :, step] = self.get_next_tokens(
-                    B, dsu_logits, do_sample, temperature, top_k, top_p
+                generated_dsu[:, :, step] = self.sample_dsu_tokens(
+                    outputs, do_sample, temperature, top_k, top_p
                 )
             else:
                 generated_dsu[:, :, step] = self.audio_delay_id

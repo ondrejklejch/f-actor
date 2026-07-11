@@ -133,11 +133,21 @@ class CsmDepthDecoderHead(nn.Module):
 
     def forward(self, hidden_states, dsu_labels):
         """
-        Teacher-forced training/eval path, first speaker only.
+        Teacher-forced training/eval path, first speaker only. Only meant to be
+        called when a loss is actually needed - see `generate()` for the
+        inference/sampling path.
 
-        hidden_states: [B, L, hidden_size] backbone per-frame hidden states.
-        dsu_labels: [B, num_dsus, L] ground-truth codebook ids for the first
-            speaker only (caller must slice out the first `num_dsus` heads).
+        hidden_states: [B, L, hidden_size] backbone per-frame hidden states,
+            where hidden_states[:, l] predicts frame (l+1)'s codebooks (standard
+            next-frame/causal-LM shift, applied by the caller).
+        dsu_labels: [B, num_dsus, L] ALREADY time-shifted so that dsu_labels[:, :, l]
+            holds frame (l+1)'s own ground-truth codebook ids - i.e. the exact
+            same `labels_shifted` tensor the caller's loss loop builds as the
+            *target* for this method's output, reused here as this frame's
+            *within-frame* teacher-forcing input (codebook (k-1)'s real id at
+            depth-decoder position k - see class docstring). Passing the raw,
+            unshifted per-frame labels here would condition each prediction on
+            the wrong frame's codebooks.
 
         Returns logits of shape [B, L, num_dsus, audio_vocab_size], drop-in
         compatible with the existing `dsu_head(...).view(...)` output (restricted
@@ -209,19 +219,44 @@ class CsmDepthDecoderHead(nn.Module):
         return dsu_logits
 
     @torch.no_grad()
-    def generate_frame(self, hidden_state_last, semantic_id, sample_fn):
+    def generate(self, hidden_state_last, sample_fn):
         """
-        Inference-time path for one frame, first speaker only: autoregressively
-        sample the acoustic codebooks 1..num_dsus-1 from the frozen depth decoder,
-        conditioned on the backbone hidden state and the already-sampled semantic
-        (codebook-0) id, which - per the class docstring - the depth decoder does
-        consume as its position-1 input (just not as one of its own prediction
-        targets, since our own semantic_head predicts it separately).
+        Inference-time path for one frame, first speaker only: samples ALL
+        `num_dsus` codebooks - first the semantic (codebook 0) id via
+        `semantic_head` + `sample_fn`, then the acoustic codebooks 1..num_dsus-1
+        autoregressively from the frozen depth decoder, conditioned on the
+        semantic id and the backbone hidden state.
+
+        hidden_state_last: [B, hidden_size] backbone hidden state for this frame.
+        sample_fn: callable(logits) -> next_token_ids, e.g. wrapping
+            DSUModel.get_next_tokens with the desired sampling params.
+
+        Returns ids of shape [B, num_dsus].
+        """
+        semantic_logits = self.semantic_logits(hidden_state_last)  # [B, V]
+        semantic_id = sample_fn(semantic_logits).view(-1, 1)  # [B, 1]
+
+        if self.num_dsus <= 1:
+            return semantic_id
+
+        acoustic_ids = self._generate_acoustic_ids(
+            hidden_state_last, semantic_id.squeeze(1), sample_fn
+        )
+        return torch.cat([semantic_id, acoustic_ids], dim=1)
+
+    @torch.no_grad()
+    def _generate_acoustic_ids(self, hidden_state_last, semantic_id, sample_fn):
+        """
+        Autoregressively sample the acoustic codebooks 1..num_dsus-1 from the
+        frozen depth decoder, conditioned on the backbone hidden state and the
+        already-sampled semantic (codebook-0) id, which - per the class
+        docstring - the depth decoder does consume as its position-1 input (just
+        not as one of its own prediction targets, since our own semantic_head
+        predicts it separately).
 
         hidden_state_last: [B, hidden_size] backbone hidden state for this frame.
         semantic_id: [B] (or [B, 1]) already-sampled codebook-0 id.
-        sample_fn: callable(logits) -> next_token_ids, e.g. wrapping
-            DSUModel.get_next_tokens with the desired sampling params.
+        sample_fn: callable(logits) -> next_token_ids.
 
         Returns acoustic ids of shape [B, num_dsus - 1].
         """
