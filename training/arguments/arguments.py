@@ -18,6 +18,7 @@ class ModelArgs:
     text_padding_weight: float = 1.0
     use_depth_decoder: bool = False
     depth_decoder_pretrained_path: str = "sesame/csm-1b"
+    attention_dropout: float = 0.1
 
     def __post_init__(self):
         if self.text_stream and self.multi_text_stream:
@@ -60,6 +61,7 @@ class TrainingArgs:
     max_steps: int = 100000
     num_train_epochs: int = 0
     learning_rate: float = 5e-5
+    warmup_ratio: float = 0.03
     output_dir: str = "./outputs"
     gradient_accumulation_steps: int = 8
     gradient_clipping: float = 1.0

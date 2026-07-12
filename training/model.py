@@ -67,6 +67,7 @@ def load_model(model_args, grad_acc_steps=1, logger=None, inference=False):
     config.text_padding_weight = model_args.text_padding_weight
     config.use_depth_decoder = model_args.use_depth_decoder
     config.depth_decoder_pretrained_path = model_args.depth_decoder_pretrained_path
+    config.attention_dropout = model_args.attention_dropout
 
     # load model (if num_dsu < 1, this will be the normal model)
     model = model_cls.from_pretrained(

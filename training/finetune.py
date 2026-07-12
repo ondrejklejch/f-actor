@@ -81,10 +81,12 @@ def train(args, logger):
         metric_for_best_model="eval_loss",
         greater_is_better=False,
         learning_rate=training_args.learning_rate,
+        warmup_ratio=training_args.warmup_ratio,
         fp16=training_args.use_fp16,
         bf16=training_args.use_bf16,
         auto_find_batch_size=training_args.auto_find_batch_size,
         remove_unused_columns=False,
+        dataloader_drop_last=True,
     )
 
     with hf_training_args.main_process_first():
