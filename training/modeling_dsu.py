@@ -687,7 +687,7 @@ class DSUModel(ModelInitializerLoader):
 
         dsu_logits = self.dsu_head(hidden_state_last).view(
             hidden_state_last.shape[0], self.num_dsu_heads, -1
-        )[:, :self.dsus]
+        )[:, :self.num_dsus]
         return sample_fn(dsu_logits)
 
     @torch.no_grad()

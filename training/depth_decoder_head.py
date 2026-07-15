@@ -90,7 +90,7 @@ class CsmDepthDecoderHead(nn.Module):
         # a leaf tensor with requires_grad=True - which then crashes on CSM's own
         # in-place `inputs_embeds[:, 0] = backbone_last_hidden_state`. Make the
         # frozen depth decoder immune to this recursive (re-)enabling.
-        self.depth_decoder.disable_input_require_grads()
+        #self.depth_decoder.disable_input_require_grads()
         self.depth_decoder.gradient_checkpointing_enable = lambda *a, **k: None
         self.depth_decoder.gradient_checkpointing_disable = lambda *a, **k: None
 
