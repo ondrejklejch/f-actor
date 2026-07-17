@@ -152,7 +152,7 @@ def load_speech_data(
             subset_size = (
                 int(len(data_split) * data_args.train_on_subset)
                 if data_args.train_on_subset
-                else 30
+                else 15
             )
             data_split = data_split.take(subset_size)
 

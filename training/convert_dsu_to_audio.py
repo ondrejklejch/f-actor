@@ -7,8 +7,8 @@ import numpy as np
 from arguments.parse_arguments import parse_args
 from inference_audio.mimi_decode import convert_to_audio as convert_to_audio_mimi
 from inference_audio.mimi_decode import load_model as load_model_mimi
-from inference_audio.nano_decode import convert_to_audio as convert_to_audio_nano
-from inference_audio.nano_decode import load_model as load_model_nano
+#from inference_audio.nano_decode import convert_to_audio as convert_to_audio_nano
+#from inference_audio.nano_decode import load_model as load_model_nano
 
 
 def process_sample(s):
