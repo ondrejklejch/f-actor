@@ -29,6 +29,7 @@ def load_speech_data(
     text_stream = model_args.text_stream
     multi_text_stream = model_args.multi_text_stream
     use_event_head = model_args.use_event_head
+    use_bc_head = model_args.use_bc_head
 
     def tokenize_speech(example):
         n_overflow_words = 0
@@ -110,9 +111,11 @@ def load_speech_data(
                 ),
                 "event_ids": (
                     # system speaker only (stream index 0, per
-                    # adapt_to_text_stream's ["system", "user"] role order)
+                    # adapt_to_text_stream's ["system", "user"] role order);
+                    # shared by use_event_head and use_bc_head, since bc
+                    # labels are just a threshold of the same event classes.
                     stacked_event_ids[:1]
-                    if use_event_head and (text_stream or multi_text_stream)
+                    if (use_event_head or use_bc_head) and (text_stream or multi_text_stream)
                     else None
                 ),
                 "skip_example": skip_example,

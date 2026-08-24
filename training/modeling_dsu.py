@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from dialogue_creation.get_text_stream import EVENT_BC
 from load_dsu_model import ModelInitializerLoader
 from torch.nn.utils.rnn import pad_sequence
 from transformers import DynamicCache, LlamaForCausalLM
@@ -38,6 +39,18 @@ class DSUModel(ModelInitializerLoader):
             event_focal_alpha
             if event_focal_alpha is not None
             else [1.0] * self.num_event_classes
+        )
+
+        # standalone binary backchannel head: own linear projection (not
+        # shared with event_head), predicts only {none, bc}. Independent of
+        # use_event_head - combining the two is not currently supported.
+        self.use_bc_head = getattr(config, "use_bc_head", False)
+        self.num_bc_classes = 2  # none, bc
+        self.bc_head = None  # initialized later in load_dsu_model.py (if use_bc_head)
+        self.bc_focal_gamma = getattr(config, "bc_focal_gamma", 2.0)
+        bc_focal_alpha = getattr(config, "bc_focal_alpha", None)
+        self.bc_focal_alpha = (
+            bc_focal_alpha if bc_focal_alpha is not None else [1.0] * self.num_bc_classes
         )
 
         self.use_depth_decoder = getattr(config, "use_depth_decoder", False)
@@ -201,10 +214,18 @@ class DSUModel(ModelInitializerLoader):
         if self.use_event_head and event_labels is not None:
             logits_labels_pairs.append((None, event_labels, "events"))
 
-        total_loss, c1_dsu_loss, c1_text_loss, c1_event_loss = None, None, None, None
+        if self.use_bc_head and event_labels is not None:
+            bc_labels = (event_labels == EVENT_BC).long()
+            logits_labels_pairs.append((None, bc_labels, "bc"))
+
+        total_loss, c1_dsu_loss, c1_text_loss, c1_event_loss, c1_bc_loss = (
+            None, None, None, None, None,
+        )
 
         if need_loss:
-            total_loss, c1_dsu_loss, c1_text_loss, c1_event_loss = 0, 0, 0, 0
+            total_loss, c1_dsu_loss, c1_text_loss, c1_event_loss, c1_bc_loss = (
+                0, 0, 0, 0, 0,
+            )
 
             for logits, labels, loss_type in logits_labels_pairs:
                 labels_padded = F.pad(labels, (0, 1), value=self.pad_token_id)
@@ -232,13 +253,18 @@ class DSUModel(ModelInitializerLoader):
                     # with H=1, matching how the single-stream text_head
                     # case reuses outputs.logits.unsqueeze(2) above.
                     logits = self.event_head(audio_hidden_padded).unsqueeze(2)
+                elif loss_type == "bc":
+                    # single-channel head (system speaker only), own
+                    # projection - see the "events" case above for the
+                    # reshape convention.
+                    logits = self.bc_head(audio_hidden_padded).unsqueeze(2)
 
                 # dsus are already restricted to the first speaker above when
                 # use_depth_decoder, so they must not be halved again here.
-                # events are single-channel (system only) by construction, so
-                # they must not be halved either.
+                # events/bc are single-channel (system only) by construction,
+                # so they must not be halved either.
                 already_c1_only = (
-                    loss_type == "events"
+                    loss_type in ("events", "bc")
                     or (loss_type == "dsus" and self.use_depth_decoder)
                 )
 
@@ -281,6 +307,18 @@ class DSUModel(ModelInitializerLoader):
                         alpha=alpha,
                         gamma=self.event_focal_gamma,
                     ).view_as(target)
+                elif loss_type == "bc":
+                    # same rationale as the "events" case above: bc is rare
+                    # relative to "none", so focal loss over plain weighted CE.
+                    alpha = torch.tensor(
+                        self.bc_focal_alpha, device=logits.device, dtype=logits.dtype
+                    )
+                    per_token_loss = self._focal_loss(
+                        logits.reshape(-1, logits.shape[-1]),
+                        target.reshape(-1),
+                        alpha=alpha,
+                        gamma=self.bc_focal_gamma,
+                    ).view_as(target)
                 else:
                     per_token_loss = F.cross_entropy(
                         logits.reshape(-1, logits.shape[-1]),
@@ -298,6 +336,8 @@ class DSUModel(ModelInitializerLoader):
                     c1_text_loss += loss
                 elif loss_type == "events":
                     c1_event_loss += loss
+                elif loss_type == "bc":
+                    c1_bc_loss += loss
                 else:
                     raise NotImplementedError
 
@@ -309,6 +349,7 @@ class DSUModel(ModelInitializerLoader):
             "c1_text_loss": c1_text_loss,
             "c1_dsu_loss": c1_dsu_loss,
             "c1_event_loss": c1_event_loss,
+            "c1_bc_loss": c1_bc_loss,
             "ts_logits": ts_logits,
             "past_key_values": past_key_values,
             "audio_hidden_last": audio_hidden_padded[:, -1, :],

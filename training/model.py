@@ -84,6 +84,9 @@ def load_model(model_args, grad_acc_steps=1, logger=None, inference=False):
     config.use_event_head = model_args.use_event_head
     config.event_focal_gamma = model_args.event_focal_gamma
     config.event_focal_alpha = model_args.event_focal_alpha
+    config.use_bc_head = model_args.use_bc_head
+    config.bc_focal_gamma = model_args.bc_focal_gamma
+    config.bc_focal_alpha = model_args.bc_focal_alpha
 
     # load model (if num_dsu < 1, this will be the normal model)
     model = model_cls.from_pretrained(
@@ -135,6 +138,9 @@ def load_model(model_args, grad_acc_steps=1, logger=None, inference=False):
 
     if model_args.use_event_head:
         model.init_or_load_event_head(model_path=model_id)
+
+    if model_args.use_bc_head:
+        model.init_or_load_bc_head(model_path=model_id)
 
     if model.num_dsus > 0:
         if model_args.use_depth_decoder:

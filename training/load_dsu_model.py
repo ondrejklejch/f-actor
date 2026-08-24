@@ -130,6 +130,15 @@ class ModelInitializerLoader:
         else:
             self.init_event_head()
 
+    def init_or_load_bc_head(self, model_path=None):
+        if not self.use_bc_head:
+            return
+
+        if self.checkpoint_has_weights(model_path, "bc_head.weight"):
+            self.load_bc_head(model_path)
+        else:
+            self.init_bc_head()
+
     def init_or_load_speaker_embed_proj(self, model_path=None):
         """
         Initialize or load the speaker embedding projection layer.
@@ -215,6 +224,18 @@ class ModelInitializerLoader:
 
         torch.nn.init.xavier_uniform_(self.event_head.weight)
         torch.nn.init.zeros_(self.event_head.bias)
+
+    def init_bc_head(self):
+        """Create the output-only backchannel head (own projection, not shared with event_head)."""
+        if not self.use_bc_head:
+            return
+
+        self.bc_head = torch.nn.Linear(
+            self.hidden_size, self.num_bc_classes
+        ).to(self.device, dtype=self.dtype)
+
+        torch.nn.init.xavier_uniform_(self.bc_head.weight)
+        torch.nn.init.zeros_(self.bc_head.bias)
 
     def init_audio_embeds(self):
         """Initialize Audio embedding layers"""
@@ -335,6 +356,23 @@ class ModelInitializerLoader:
         self.event_head.weight.data.copy_(state_dict["event_head.weight"])
         self.event_head.bias.data.copy_(state_dict["event_head.bias"])
         self.event_head.to(self.device, dtype=self.dtype)
+
+    def load_bc_head(self, model_path):
+        """Load the output-only backchannel head from saved safetensors (for inference)."""
+        if not self.use_bc_head:
+            return
+
+        self.bc_head = torch.nn.Linear(self.hidden_size, self.num_bc_classes)
+
+        state_dict = self.load_safetensors_state_dict(model_path)
+
+        for key in ["bc_head.weight", "bc_head.bias"]:
+            if key not in state_dict:
+                raise KeyError(f"Missing key '{key}' in checkpoint {model_path}")
+
+        self.bc_head.weight.data.copy_(state_dict["bc_head.weight"])
+        self.bc_head.bias.data.copy_(state_dict["bc_head.bias"])
+        self.bc_head.to(self.device, dtype=self.dtype)
 
     def load_audio_embeds(self, model_path):
         """Load separate audio embeddings from saved safetensors."""

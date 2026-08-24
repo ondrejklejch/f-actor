@@ -36,6 +36,13 @@ class ModelArgs:
     # per-class focal-loss alpha, ordered [none, epad, bc, interrupt, eou];
     # None (the default) falls back to uniform weighting in DSUModel.__init__.
     event_focal_alpha: Optional[list] = field(default=None)
+    # standalone binary backchannel head, independent of use_event_head: own
+    # linear projection, own focal loss, predicts only {none, bc}.
+    use_bc_head: bool = False
+    bc_focal_gamma: float = 2.0
+    # per-class focal-loss alpha, ordered [none, bc]; None (the default)
+    # falls back to uniform weighting in DSUModel.__init__.
+    bc_focal_alpha: Optional[list] = field(default=None)
 
     def __post_init__(self):
         if self.text_stream and self.multi_text_stream:
