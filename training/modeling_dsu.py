@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from backchannel_decoding import NullLogitsProcessor
 from dialogue_creation.get_text_stream import EVENT_BC
 from load_dsu_model import ModelInitializerLoader
 from torch.nn.utils.rnn import pad_sequence
@@ -353,6 +354,14 @@ class DSUModel(ModelInitializerLoader):
             "ts_logits": ts_logits,
             "past_key_values": past_key_values,
             "audio_hidden_last": audio_hidden_padded[:, -1, :],
+            # unlike c1_bc_loss above (only populated when event_labels is
+            # available, i.e. during training), this is always populated
+            # during inference so generate() can act on it every step.
+            "bc_probs": (
+                F.softmax(self.bc_head(audio_hidden_padded[:, -1, :]), dim=-1)[:, 1]
+                if self.use_bc_head and inference
+                else None
+            ),
         }
 
     @staticmethod
@@ -927,6 +936,11 @@ class DSUModel(ModelInitializerLoader):
         n_delay_text_stream = kwargs.pop("n_delay_text_stream", 0)
         talk_to_itself = kwargs.pop("talk_to_itself", True)
         spk_emb = kwargs.pop("spk_emb", None)
+        # caller-constructed LogitsProcessor (see backchannel_decoding.py) -
+        # generate() only depends on its process() contract, not on how/
+        # whether backchannel forcing is configured. Defaults to a no-op so
+        # the free-running path is unaffected when the caller doesn't opt in.
+        bc_processor = kwargs.pop("bc_processor", None) or NullLogitsProcessor()
 
         if self.text_stream and text_sample is not None and dsu_sample is None:
             raise ValueError("Need to add dsu sample if you want text sample!")
@@ -1044,6 +1058,13 @@ class DSUModel(ModelInitializerLoader):
 
             if self.text_stream or self.multi_text_stream:
                 ts_logits = outputs["ts_logits"][:, -1, :, :]  # [B, L_total, H,  V]
+                ts_logits = bc_processor.process(
+                    ts_logits,
+                    outputs.get("bc_probs"),
+                    prev_tokens=(
+                        generated_text[:, 0, step - 1] if step > start_step else None
+                    ),
+                )
 
                 generated_text[:, :, step] = self.get_next_tokens(
                     B, ts_logits, do_sample, temperature, top_k, top_p
