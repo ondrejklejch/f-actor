@@ -869,13 +869,17 @@ class DSUModel(ModelInitializerLoader):
 
     @torch.no_grad()
     def sample_dsu_tokens(
-        self, outputs, do_sample, temperature, top_k, top_p, spk_emb=None
+        self, outputs, do_sample, temperature, top_k, top_p, speaker_context=None
     ):
         """
         Sample this step's dsu ids from a forward() call made with need_loss=False.
         Head-agnostic: dispatches to the frozen depth decoder's own generate()
         (which also samples the semantic id) or the flat dsu_head, whichever is
         active.
+
+        speaker_context: depth_decoder_head.compute_speaker_context(...) output,
+            precomputed once by the caller's frame loop (see generate()) rather
+            than recomputed on every frame - spk_emb is constant across frames.
 
         Returns ids of shape [B, num_dsu_heads].
         """
@@ -884,11 +888,8 @@ class DSUModel(ModelInitializerLoader):
             logits.shape[0], logits, do_sample, temperature, top_k, top_p
         )
         if self.use_depth_decoder:
-            depth_spk_emb = self._depth_decoder_spk_emb(
-                spk_emb, hidden_state_last.shape[0]
-            )
             return self.depth_decoder_head.generate(
-                hidden_state_last, sample_fn, spk_emb=depth_spk_emb
+                hidden_state_last, sample_fn, speaker_context=speaker_context
             )
 
         dsu_logits = self.dsu_head(hidden_state_last).view(
@@ -989,6 +990,15 @@ class DSUModel(ModelInitializerLoader):
             # Duplicate DSU for two-speaker simulation
             generated_dsu = duplicate_with_head_rotation(generated_dsu)
 
+        # spk_emb is constant across the whole frame loop below, so compute
+        # the depth decoder's speaker-adapter projections once here rather
+        # than re-running them on every generated frame.
+        depth_decoder_speaker_context = None
+        if self.use_depth_decoder:
+            depth_decoder_speaker_context = self.depth_decoder_head.compute_speaker_context(
+                self._depth_decoder_spk_emb(spk_emb, generated_dsu.shape[0])
+            )
+
         if self.num_text_streams > 0:
             if talk_to_itself:
                 # Take first 2 text streams from context
@@ -1022,7 +1032,12 @@ class DSUModel(ModelInitializerLoader):
 
             if step >= n_delay_audio_stream:
                 generated_dsu[:, :self.num_dsus, step] = self.sample_dsu_tokens(
-                    outputs, do_sample, temperature, top_k, top_p, spk_emb=spk_emb
+                    outputs,
+                    do_sample,
+                    temperature,
+                    top_k,
+                    top_p,
+                    speaker_context=depth_decoder_speaker_context,
                 )
             else:
                 generated_dsu[:, :, step] = self.audio_delay_id

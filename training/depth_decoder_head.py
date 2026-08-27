@@ -1,6 +1,13 @@
+from collections import namedtuple
+
 import torch
 import torch.nn as nn
 from transformers import DynamicCache
+
+# Precomputed speaker-adapter outputs (see CsmDepthDecoderHead.compute_speaker_context).
+# acoustic: [B, backbone_hidden_size], added into the depth decoder's context.
+# semantic: [B, hidden_size], added into hidden_states before semantic_head.
+SpeakerContext = namedtuple("SpeakerContext", ["acoustic", "semantic"])
 
 
 class CsmDepthDecoderHead(nn.Module):
@@ -121,6 +128,20 @@ class CsmDepthDecoderHead(nn.Module):
             hidden_size, depth_config.backbone_hidden_size, bias=False
         )
 
+        # Real zero tensors (not persisted in the checkpoint) so
+        # compute_speaker_context can always return actual tensors - shape
+        # [1, dim] broadcasts against any batch size - instead of a Python
+        # `0` placeholder, letting callers unsqueeze/broadcast them
+        # unconditionally regardless of whether speaker conditioning is on.
+        self.register_buffer(
+            "_zero_acoustic",
+            torch.zeros(1, depth_config.backbone_hidden_size),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_zero_semantic", torch.zeros(1, hidden_size), persistent=False
+        )
+
         # Optional direct speaker-embedding conditioning (independent of - and
         # in addition to - DSUModel's own `use_speaker_embedding` backbone
         # prompt token). Two separate adapters since they feed different
@@ -177,25 +198,44 @@ class CsmDepthDecoderHead(nn.Module):
             self.depth_decoder.eval()  # never let Model.train() unfreeze/un-eval the frozen decoder
         return self
 
-    def semantic_logits(self, hidden_states, spk_emb=None):
+    def compute_speaker_context(self, spk_emb):
+        """
+        Runs both speaker adapters exactly once. spk_emb is constant for an
+        entire utterance/generation call, so callers that invoke this class
+        once per frame (DSUModel.generate()'s autoregressive loop) should call
+        this once up front and pass the resulting SpeakerContext into every
+        per-frame `generate()`/`semantic_logits()` call, instead of passing
+        raw spk_emb each time and re-running the adapters on every frame.
+
+        spk_emb: [B, speaker_embed_dim] or None.
+
+        Returns a SpeakerContext(acoustic, semantic) namedtuple. When disabled
+        (`use_speaker_embedding=False`) or spk_emb is None, both fields are
+        real all-zero tensors (shape [1, dim], broadcasting against any batch
+        size) - a true additive identity, so callers can add/unsqueeze them
+        unconditionally instead of branching on None or tensor-ness.
+        """
+        if not self.use_speaker_embedding or spk_emb is None:
+            return SpeakerContext(acoustic=self._zero_acoustic, semantic=self._zero_semantic)
+        return SpeakerContext(
+            acoustic=self.acoustic_speaker_adapter(spk_emb),
+            semantic=self.semantic_speaker_adapter(spk_emb),
+        )
+
+    def semantic_logits(self, hidden_states, speaker_context=None):
         """
         hidden_states: [B, L, hidden_size] or [B, hidden_size].
-        spk_emb: [B, speaker_embed_dim], added (broadcast over L if present)
-            when `use_speaker_embedding` is set; ignored otherwise.
+        speaker_context: SpeakerContext from `compute_speaker_context`, or None
+            (treated the same as an all-zero SpeakerContext).
         """
-        if self.use_speaker_embedding and spk_emb is not None:
-            proj = self.semantic_speaker_adapter(spk_emb)  # [B, hidden_size]
-            if hidden_states.dim() == 3:
-                proj = proj.unsqueeze(1)  # [B, 1, hidden_size], broadcasts over L
-            hidden_states = hidden_states + proj
-        return self.semantic_head(hidden_states)  # [..., V]
-
-    def _speaker_context(self, spk_emb):
-        """Projects spk_emb into backbone_hidden_size for the acoustic path, or
-        returns 0 if disabled/unavailable (safe to add unconditionally)."""
-        if self.use_speaker_embedding and spk_emb is not None:
-            return self.acoustic_speaker_adapter(spk_emb)
-        return 0
+        if speaker_context is None:
+            speaker_context = SpeakerContext(
+                acoustic=self._zero_acoustic, semantic=self._zero_semantic
+            )
+        proj = speaker_context.semantic  # [B (or 1), hidden_size]
+        if hidden_states.dim() == 3:
+            proj = proj.unsqueeze(1)  # [B (or 1), 1, hidden_size], broadcasts over L
+        return self.semantic_head(hidden_states + proj)  # [..., V]
 
     def forward(self, hidden_states, dsu_labels, spk_emb=None):
         """
@@ -229,7 +269,8 @@ class CsmDepthDecoderHead(nn.Module):
             f"speaker only), got {dsu_labels.shape[1]}"
         )
 
-        semantic_logits = self.semantic_logits(hidden_states, spk_emb)  # [B, L, V]
+        speaker_context = self.compute_speaker_context(spk_emb)
+        semantic_logits = self.semantic_logits(hidden_states, speaker_context)  # [B, L, V]
 
         if self.num_dsus > 1:
             # batch/end-of-sequence padding ids (e.g. the tokenizer's pad/eos id, a
@@ -255,11 +296,10 @@ class CsmDepthDecoderHead(nn.Module):
             )
 
             projected = self.backbone_adapter(hidden_states)  # [B, L, backbone_hidden]
-            if self.use_speaker_embedding and spk_emb is not None:
-                # spk_emb is [B, dim], per-frame context is [B, L, backbone_hidden] -
-                # broadcast the (per-example, not per-frame) speaker adapter output
-                # over L before flattening to match `projected`.
-                projected = projected + self.acoustic_speaker_adapter(spk_emb).unsqueeze(1)
+            # speaker_context.acoustic: [B (or 1), dim] -> broadcast the
+            # (per-example, not per-frame) speaker adapter output over L to
+            # match `projected`.
+            projected = projected + speaker_context.acoustic.unsqueeze(1)
             context = projected.reshape(B * L, -1)
 
             # position 0 = placeholder (overwritten by the hidden state below, and
@@ -293,7 +333,7 @@ class CsmDepthDecoderHead(nn.Module):
         return dsu_logits
 
     @torch.no_grad()
-    def generate(self, hidden_state_last, sample_fn, spk_emb=None):
+    def generate(self, hidden_state_last, sample_fn, speaker_context=None):
         """
         Inference-time path for one frame, first speaker only: samples ALL
         `num_dsus` codebooks - first the semantic (codebook 0) id via
@@ -304,19 +344,22 @@ class CsmDepthDecoderHead(nn.Module):
         hidden_state_last: [B, hidden_size] backbone hidden state for this frame.
         sample_fn: callable(logits) -> next_token_ids, e.g. wrapping
             DSUModel.get_next_tokens with the desired sampling params.
-        spk_emb: [B, speaker_embed_dim] optional, only used when
-            `use_speaker_embedding` is set - see class docstring.
+        speaker_context: SpeakerContext from `compute_speaker_context`, or None.
+            Callers driving an autoregressive per-frame loop (spk_emb is
+            constant across the whole generation) should compute this once
+            up front and pass the same object into every frame's `generate()`
+            call, rather than recomputing the adapters on every frame.
 
         Returns ids of shape [B, num_dsus].
         """
-        semantic_logits = self.semantic_logits(hidden_state_last, spk_emb)  # [B, V]
+        semantic_logits = self.semantic_logits(hidden_state_last, speaker_context)  # [B, V]
         semantic_id = sample_fn(semantic_logits).view(-1, 1)  # [B, 1]
 
         if self.num_dsus <= 1:
             return semantic_id
 
         acoustic_ids = self._generate_acoustic_ids(
-            hidden_state_last, semantic_id.squeeze(1), sample_fn, spk_emb
+            hidden_state_last, semantic_id.squeeze(1), sample_fn, speaker_context
         )
         return torch.cat([semantic_id, acoustic_ids], dim=1)
 
@@ -410,7 +453,7 @@ class CsmDepthDecoderHead(nn.Module):
 
     @torch.no_grad()
     def _generate_acoustic_ids(
-        self, hidden_state_last, semantic_id, sample_fn, spk_emb=None
+        self, hidden_state_last, semantic_id, sample_fn, speaker_context=None
     ):
         """
         Autoregressively sample the acoustic codebooks 1..num_dsus-1 from the
@@ -429,8 +472,7 @@ class CsmDepthDecoderHead(nn.Module):
         hidden_state_last: [B, hidden_size] backbone hidden state for this frame.
         semantic_id: [B] (or [B, 1]) already-sampled codebook-0 id.
         sample_fn: callable(logits) -> next_token_ids.
-        spk_emb: [B, speaker_embed_dim] optional, only used when
-            `use_speaker_embedding` is set - see class docstring.
+        speaker_context: SpeakerContext from `compute_speaker_context`, or None.
 
         Returns acoustic ids of shape [B, num_dsus - 1].
         """
@@ -441,7 +483,11 @@ class CsmDepthDecoderHead(nn.Module):
             return torch.zeros(B, 0, dtype=torch.long, device=device)
 
         context = self.backbone_adapter(hidden_state_last)  # [B, backbone_hidden]
-        context = context + self._speaker_context(spk_emb)
+        if speaker_context is None:
+            speaker_context = SpeakerContext(
+                acoustic=self._zero_acoustic, semantic=self._zero_semantic
+            )
+        context = context + speaker_context.acoustic
         past_key_values = DynamicCache()
         attention_mask = torch.ones(B, 1, dtype=torch.long, device=device)
         past_key_values, attention_mask = self._seed(
