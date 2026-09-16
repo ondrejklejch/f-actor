@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from data_collator_dsu import DSUDataCollator
 from datasets import concatenate_datasets, load_dataset
-from dialogue_creation.get_prompt import build_prompt
+from dialogue_creation.get_prompt import build_prompt, build_prompt_personaplex
 from dialogue_creation.get_text_stream import adapt_to_text_stream
 from dialogue_creation.utils import (
     COLUMNS_TO_SELECT,
@@ -30,6 +30,11 @@ def load_speech_data(
     multi_text_stream = model_args.multi_text_stream
     use_event_head = model_args.use_event_head
     use_bc_head = model_args.use_bc_head
+    prompt_fn = (
+        build_prompt_personaplex
+        if data_args.prompt_style == "personaplex"
+        else build_prompt
+    )
 
     def tokenize_speech(example):
         n_overflow_words = 0
@@ -76,7 +81,7 @@ def load_speech_data(
                     else SKIP_EXAMPLE_DICT_TRAIN
                 )  # empty dict
 
-        prompt_system = build_prompt(
+        prompt_system = prompt_fn(
             example,
             max_length=max_length,
             orig_dsu_length=orig_dsu_length,
@@ -124,7 +129,7 @@ def load_speech_data(
             }
 
         else:
-            prompt_user = build_prompt(
+            prompt_user = prompt_fn(
                 example,
                 max_length=max_length,
                 orig_dsu_length=orig_dsu_length,

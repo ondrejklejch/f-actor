@@ -56,6 +56,55 @@ Ensure that the dialogue reflects the behaviours of you.\n"""
     return prompt
 
 
+def build_prompt_personaplex(
+    example,
+    max_length,
+    orig_dsu_length,
+    role_to_speaker_map,
+    use_system_narrative=False,
+    speech=False,
+):
+    """PersonaPlex-style instruction: no explicit behavior counts, just a
+    short persona/topic/name sentence, e.g.
+    "You enjoy having a good conversation. Have a casual conversation about
+    favorite foods and cooking experiences. You are David."
+
+    Requires the example to have non-empty "topic_title" and "topic_text"
+    fields (e.g. the Fisher dataset); raises if they are missing or empty.
+    """
+
+    system_id = role_to_speaker_map["system"]
+    system_speaker = example["speakers"][system_id]
+
+    if "topic_title" not in example or "topic_text" not in example:
+        raise ValueError(
+            "build_prompt_personaplex requires 'topic_title' and "
+            "'topic_text' fields on the example, but the example has keys "
+            f"{sorted(example.keys())}"
+        )
+
+    topic_title = example["topic_title"]
+    topic_text = example["topic_text"]
+    if not topic_title or not topic_text:
+        raise ValueError(
+            "build_prompt_personaplex requires non-empty 'topic_title' and "
+            "'topic_text' fields on the example, but got "
+            f"topic_title={topic_title!r}, topic_text={topic_text!r}"
+        )
+
+    prompt = (
+        "You enjoy having a good conversation. "
+        f"Have a casual conversation about {topic_title.lower()}. {topic_text} "
+        f"You are {system_speaker}.\n"
+    )
+    if not speech:
+        prompt += "<|SOT|>"
+    else:
+        prompt += "<|SOS|>"
+
+    return prompt
+
+
 def in_audio_subset(utt, words, audio_duration):
     if words:
         end_utt_time = words[-1]["start"] + words[-1]["dur"]

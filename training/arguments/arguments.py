@@ -68,6 +68,7 @@ class DataArgs:
     add_eou_token: bool = False
     debug: bool = False
     use_system_narrative: bool = False
+    prompt_style: str = "default"  # "default" or "personaplex"
     remove_start_silence: bool = False
     preprocessing_num_workers: Optional[int] = None
 
