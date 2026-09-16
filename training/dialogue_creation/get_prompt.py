@@ -73,8 +73,16 @@ def build_prompt_personaplex(
     fields (e.g. the Fisher dataset); raises if they are missing or empty.
     """
 
+    first_speaker, _, _ = get_meta_data(
+        example,
+        max_length=max_length,
+        n_dsu=orig_dsu_length,
+        role_to_speaker_map=role_to_speaker_map,
+    )
+
     system_id = role_to_speaker_map["system"]
     system_speaker = example["speakers"][system_id]
+    system_speaks_first = first_speaker == "system"
 
     if "topic_title" not in example or "topic_text" not in example:
         raise ValueError(
@@ -95,8 +103,11 @@ def build_prompt_personaplex(
     prompt = (
         "You enjoy having a good conversation. "
         f"Have a casual conversation about {topic_title.lower()}. {topic_text} "
-        f"You are {system_speaker}.\n"
+        f"You are {system_speaker}."
     )
+    if system_speaks_first:
+        prompt += " You start the dialogue."
+    prompt += "\n"
     if not speech:
         prompt += "<|SOT|>"
     else:
