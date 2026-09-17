@@ -1,9 +1,13 @@
 import json
+import logging
+import math
 import os
 
 import torch
 from safetensors import safe_open
 from safetensors.torch import load_file
+
+logger = logging.getLogger(__name__)
 
 
 class ModelInitializerLoader:
@@ -134,7 +138,9 @@ class ModelInitializerLoader:
         if not self.use_bc_head:
             return
 
-        if self.checkpoint_has_weights(model_path, "bc_head.weight"):
+        if self.checkpoint_has_weights(
+            model_path, "bc_head.0.weight"
+        ) or self.checkpoint_has_weights(model_path, "bc_head.weight"):
             self.load_bc_head(model_path)
         else:
             self.init_bc_head()
@@ -226,16 +232,32 @@ class ModelInitializerLoader:
         torch.nn.init.zeros_(self.event_head.bias)
 
     def init_bc_head(self):
-        """Create the output-only backchannel head (own projection, not shared with event_head)."""
+        """Create the output-only backchannel head (own projection, not shared with event_head).
+
+        Linear(hidden -> 256) -> GELU -> Linear(256 -> 1), matching the
+        personaplex-fisher-lora-backchannel-v14b architecture (context=0, no temporal
+        convolution). Single output logit -- trained with binary sigmoid focal loss,
+        like bcmore's MoshiBackchannelHead, rather than 2-way softmax.
+        """
         if not self.use_bc_head:
             return
 
-        self.bc_head = torch.nn.Linear(
-            self.hidden_size, self.num_bc_classes
+        self.bc_head = torch.nn.Sequential(
+            torch.nn.Linear(self.hidden_size, self.bc_head_hidden),
+            torch.nn.GELU(),
+            torch.nn.Linear(self.bc_head_hidden, 1),
         ).to(self.device, dtype=self.dtype)
 
-        torch.nn.init.xavier_uniform_(self.bc_head.weight)
-        torch.nn.init.zeros_(self.bc_head.bias)
+        torch.nn.init.xavier_uniform_(self.bc_head[0].weight)
+        torch.nn.init.zeros_(self.bc_head[0].bias)
+        torch.nn.init.xavier_uniform_(self.bc_head[2].weight)
+        # Start the head predicting the class prior rather than ~50%, so early
+        # steps aren't spent unlearning gross over-confidence on a rare
+        # positive class -- same trick as bcmore's
+        # MoshiBackchannelOutput.reset_prior_bias().
+        prior = min(max(self.bc_prior, 1e-6), 1 - 1e-6)
+        with torch.no_grad():
+            self.bc_head[2].bias.fill_(math.log(prior / (1 - prior)))
 
     def init_audio_embeds(self):
         """Initialize Audio embedding layers"""
@@ -358,20 +380,57 @@ class ModelInitializerLoader:
         self.event_head.to(self.device, dtype=self.dtype)
 
     def load_bc_head(self, model_path):
-        """Load the output-only backchannel head from saved safetensors (for inference)."""
+        """Load the output-only backchannel head from saved safetensors (for inference).
+
+        Supports two on-disk shapes: the current Linear->GELU->Linear head
+        ("bc_head.0.*"/"bc_head.2.*"), and the older single-Linear head
+        ("bc_head.weight"/"bc_head.bias") from checkpoints saved before the
+        hidden layer was added, so pre-existing bc-head checkpoints keep loading.
+        """
         if not self.use_bc_head:
             return
 
-        self.bc_head = torch.nn.Linear(self.hidden_size, self.num_bc_classes)
-
         state_dict = self.load_safetensors_state_dict(model_path)
 
-        for key in ["bc_head.weight", "bc_head.bias"]:
-            if key not in state_dict:
-                raise KeyError(f"Missing key '{key}' in checkpoint {model_path}")
+        if "bc_head.0.weight" in state_dict:
+            for key in [
+                "bc_head.0.weight", "bc_head.0.bias", "bc_head.2.weight", "bc_head.2.bias",
+            ]:
+                if key not in state_dict:
+                    raise KeyError(f"Missing key '{key}' in checkpoint {model_path}")
 
-        self.bc_head.weight.data.copy_(state_dict["bc_head.weight"])
-        self.bc_head.bias.data.copy_(state_dict["bc_head.bias"])
+            # Infer the output width from the checkpoint rather than assuming 1
+            # (current) or num_bc_classes (an earlier, since-replaced shape), so
+            # both keep loading correctly.
+            bc_out_features = state_dict["bc_head.2.weight"].shape[0]
+            self.bc_head = torch.nn.Sequential(
+                torch.nn.Linear(self.hidden_size, self.bc_head_hidden),
+                torch.nn.GELU(),
+                torch.nn.Linear(self.bc_head_hidden, bc_out_features),
+            )
+
+            self.bc_head[0].weight.data.copy_(state_dict["bc_head.0.weight"])
+            self.bc_head[0].bias.data.copy_(state_dict["bc_head.0.bias"])
+            self.bc_head[2].weight.data.copy_(state_dict["bc_head.2.weight"])
+            self.bc_head[2].bias.data.copy_(state_dict["bc_head.2.bias"])
+            logger.info(
+                "Loaded bc_head as Linear->GELU->Linear (hidden=%d, out=%d) from %s",
+                self.bc_head_hidden, bc_out_features, model_path,
+            )
+        else:
+            self.bc_head = torch.nn.Linear(self.hidden_size, self.num_bc_classes)
+
+            for key in ["bc_head.weight", "bc_head.bias"]:
+                if key not in state_dict:
+                    raise KeyError(f"Missing key '{key}' in checkpoint {model_path}")
+
+            self.bc_head.weight.data.copy_(state_dict["bc_head.weight"])
+            self.bc_head.bias.data.copy_(state_dict["bc_head.bias"])
+            logger.info(
+                "Loaded bc_head as single Linear (legacy, pre-hidden-layer) from %s",
+                model_path,
+            )
+
         self.bc_head.to(self.device, dtype=self.dtype)
 
     def load_audio_embeds(self, model_path):

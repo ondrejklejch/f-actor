@@ -37,12 +37,20 @@ class ModelArgs:
     # None (the default) falls back to uniform weighting in DSUModel.__init__.
     event_focal_alpha: Optional[list] = field(default=None)
     # standalone binary backchannel head, independent of use_event_head: own
-    # linear projection, own focal loss, predicts only {none, bc}.
+    # Linear->GELU->Linear projection to a single logit (matching
+    # personaplex-fisher-lora-backchannel-v14b, context=0/no convolution),
+    # trained with binary sigmoid focal loss like bcmore's MoshiBackchannelHead.
     use_bc_head: bool = False
+    bc_head_hidden: int = 256
+    # class prior for the head's output bias at init (logit(bc_prior)), so it
+    # starts predicting the true positive rate instead of ~50%, same as
+    # bcmore's backchannel_prior. Only affects a freshly-initialized head, not
+    # one loaded from a checkpoint.
+    bc_prior: float = 0.005
     bc_focal_gamma: float = 2.0
-    # per-class focal-loss alpha, ordered [none, bc]; None (the default)
-    # falls back to uniform weighting in DSUModel.__init__.
-    bc_focal_alpha: Optional[list] = field(default=None)
+    # scalar weight on the positive ("bc") class, same convention and default
+    # as bcmore's backchannel_focal_alpha.
+    bc_focal_alpha: float = 0.9
 
     def __post_init__(self):
         if self.text_stream and self.multi_text_stream:

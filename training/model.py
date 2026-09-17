@@ -85,6 +85,8 @@ def load_model(model_args, grad_acc_steps=1, logger=None, inference=False):
     config.event_focal_gamma = model_args.event_focal_gamma
     config.event_focal_alpha = model_args.event_focal_alpha
     config.use_bc_head = model_args.use_bc_head
+    config.bc_head_hidden = model_args.bc_head_hidden
+    config.bc_prior = model_args.bc_prior
     config.bc_focal_gamma = model_args.bc_focal_gamma
     config.bc_focal_alpha = model_args.bc_focal_alpha
 

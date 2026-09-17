@@ -48,11 +48,16 @@ class DSUModel(ModelInitializerLoader):
         self.use_bc_head = getattr(config, "use_bc_head", False)
         self.num_bc_classes = 2  # none, bc
         self.bc_head = None  # initialized later in load_dsu_model.py (if use_bc_head)
+        self.bc_head_hidden = getattr(config, "bc_head_hidden", 256)
+        self.bc_prior = getattr(config, "bc_prior", 0.005)
         self.bc_focal_gamma = getattr(config, "bc_focal_gamma", 2.0)
-        bc_focal_alpha = getattr(config, "bc_focal_alpha", None)
-        self.bc_focal_alpha = (
-            bc_focal_alpha if bc_focal_alpha is not None else [1.0] * self.num_bc_classes
-        )
+        # scalar alpha weighting the positive ("bc") class, matching bcmore's
+        # binary sigmoid focal loss (default 0.9, same as
+        # personaplex-fisher-lora-backchannel-v14b). Used directly for the
+        # current single-logit head; the legacy two-way-softmax head (loaded
+        # from checkpoints predating the binary loss) derives its per-class
+        # weights from it as [1 - alpha, alpha].
+        self.bc_focal_alpha = getattr(config, "bc_focal_alpha", 0.9)
 
         self.use_depth_decoder = getattr(config, "use_depth_decoder", False)
         self.depth_decoder_pretrained_path = getattr(
@@ -309,17 +314,31 @@ class DSUModel(ModelInitializerLoader):
                         gamma=self.event_focal_gamma,
                     ).view_as(target)
                 elif loss_type == "bc":
-                    # same rationale as the "events" case above: bc is rare
-                    # relative to "none", so focal loss over plain weighted CE.
-                    alpha = torch.tensor(
-                        self.bc_focal_alpha, device=logits.device, dtype=logits.dtype
-                    )
-                    per_token_loss = self._focal_loss(
-                        logits.reshape(-1, logits.shape[-1]),
-                        target.reshape(-1),
-                        alpha=alpha,
-                        gamma=self.bc_focal_gamma,
-                    ).view_as(target)
+                    if logits.shape[-1] == 1:
+                        # current head: single logit, binary sigmoid focal
+                        # loss (arXiv:1708.02002), matching bcmore's
+                        # MoshiBackchannelHead._backchannel_loss_and_stats.
+                        per_token_loss = self._binary_focal_loss(
+                            logits.squeeze(-1),
+                            target.float(),
+                            alpha=self.bc_focal_alpha,
+                            gamma=self.bc_focal_gamma,
+                        )
+                    else:
+                        # legacy head loaded from a checkpoint predating the
+                        # binary loss: 2-way softmax, so fall back to the
+                        # multiclass focal loss with per-class weights
+                        # [1 - alpha, alpha] derived from the same scalar.
+                        alpha = torch.tensor(
+                            [1.0 - self.bc_focal_alpha, self.bc_focal_alpha],
+                            device=logits.device, dtype=logits.dtype,
+                        )
+                        per_token_loss = self._focal_loss(
+                            logits.reshape(-1, logits.shape[-1]),
+                            target.reshape(-1),
+                            alpha=alpha,
+                            gamma=self.bc_focal_gamma,
+                        ).view_as(target)
                 else:
                     per_token_loss = F.cross_entropy(
                         logits.reshape(-1, logits.shape[-1]),
@@ -358,11 +377,36 @@ class DSUModel(ModelInitializerLoader):
             # available, i.e. during training), this is always populated
             # during inference so generate() can act on it every step.
             "bc_probs": (
-                F.softmax(self.bc_head(audio_hidden_padded[:, -1, :]), dim=-1)[:, 1]
+                self._bc_probs(audio_hidden_padded[:, -1, :])
                 if self.use_bc_head and inference
                 else None
             ),
         }
+
+    def _bc_probs(self, hidden):
+        """P(bc) from the bc head's raw output: sigmoid for the current single-logit
+        head, softmax[:, 1] for a legacy two-way-softmax head (see the "bc" branch
+        in the loss loop above)."""
+        bc_out = self.bc_head(hidden)
+        if bc_out.shape[-1] == 1:
+            return torch.sigmoid(bc_out.squeeze(-1))
+        return F.softmax(bc_out, dim=-1)[:, 1]
+
+    @staticmethod
+    def _binary_focal_loss(logits, target, alpha, gamma):
+        """Binary sigmoid focal loss (arXiv:1708.02002), matching bcmore's
+        MoshiBackchannelHead._backchannel_loss_and_stats.
+
+        logits, target: same-shape float tensors; target in {0, 1} (or soft,
+        anywhere in [0, 1]). alpha: scalar weight on the positive class.
+        Returns per-element loss, unreduced.
+        """
+        logits = logits.float()
+        bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
+        probs = torch.sigmoid(logits)
+        p_t = probs * target + (1 - probs) * (1 - target)
+        alpha_t = alpha * target + (1 - alpha) * (1 - target)
+        return alpha_t * (1 - p_t).pow(gamma) * bce
 
     @staticmethod
     def _focal_loss(logits, target, alpha, gamma):
