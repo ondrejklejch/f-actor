@@ -108,13 +108,27 @@ class DSUTrainer(Trainer):
     DepthDecoderLRGateCallback, not by excluding params here.
     """
 
+    # Auxiliary per-loss-type outputs (see modeling_dsu.py's return dict) to
+    # mirror into the logger, train and eval, under these short names.
+    _AUX_LOSS_KEYS = {
+        "c1_bc_loss": "bc_loss",
+        "c1_dsu_loss": "dsu_loss",
+        "c1_text_loss": "text_loss",
+    }
+
     def __init__(self, *args, depth_decoder_lr=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.depth_decoder_lr = depth_decoder_lr
-        self._bc_loss_sum = torch.tensor(0.0, device=self.args.device)
-        self._bc_loss_count = 0
-        self._eval_bc_loss_sum = torch.tensor(0.0, device=self.args.device)
-        self._eval_bc_loss_count = 0
+        self._aux_loss_sums = {
+            name: torch.tensor(0.0, device=self.args.device)
+            for name in self._AUX_LOSS_KEYS.values()
+        }
+        self._aux_loss_counts = {name: 0 for name in self._AUX_LOSS_KEYS.values()}
+        self._eval_aux_loss_sums = {
+            name: torch.tensor(0.0, device=self.args.device)
+            for name in self._AUX_LOSS_KEYS.values()
+        }
+        self._eval_aux_loss_counts = {name: 0 for name in self._AUX_LOSS_KEYS.values()}
         # Eval-only (see compute_loss): accumulated across an eval pass to
         # compute a threshold-free PR-AUC once per evaluate() call, then
         # cleared - unlike the losses above this isn't summed on the fly
@@ -126,16 +140,15 @@ class DSUTrainer(Trainer):
         loss, outputs = super().compute_loss(
             model, inputs, return_outputs=True, **kwargs
         )
-        bc_loss = outputs["c1_bc_loss"] if isinstance(outputs, dict) else outputs.get(
-            "c1_bc_loss"
+        sums = self._aux_loss_sums if model.training else self._eval_aux_loss_sums
+        counts = (
+            self._aux_loss_counts if model.training else self._eval_aux_loss_counts
         )
-        if bc_loss is not None:
-            if model.training:
-                self._bc_loss_sum += bc_loss.detach()
-                self._bc_loss_count += 1
-            else:
-                self._eval_bc_loss_sum += bc_loss.detach()
-                self._eval_bc_loss_count += 1
+        for output_key, log_name in self._AUX_LOSS_KEYS.items():
+            value = outputs.get(output_key)
+            if value is not None:
+                sums[log_name] += value.detach()
+                counts[log_name] += 1
         if not model.training and outputs.get("c1_bc_probs") is not None:
             # .float(): probs come out bf16/fp16 under mixed precision, which
             # numpy() can't convert directly.
@@ -144,17 +157,24 @@ class DSUTrainer(Trainer):
         return (loss, outputs) if return_outputs else loss
 
     def log(self, logs, *args, **kwargs):
-        if "loss" in logs and self._bc_loss_count > 0:
+        if "loss" in logs:
             # Train-step logging, identified by the "loss" key HF puts there.
-            logs["bc_loss"] = (self._bc_loss_sum / self._bc_loss_count).item()
-            self._bc_loss_sum -= self._bc_loss_sum
-            self._bc_loss_count = 0
-        elif "eval_loss" in logs and self._eval_bc_loss_count > 0:
-            logs["eval_bc_loss"] = (
-                self._eval_bc_loss_sum / self._eval_bc_loss_count
-            ).item()
-            self._eval_bc_loss_sum -= self._eval_bc_loss_sum
-            self._eval_bc_loss_count = 0
+            for name in self._AUX_LOSS_KEYS.values():
+                if self._aux_loss_counts[name] > 0:
+                    logs[name] = (
+                        self._aux_loss_sums[name] / self._aux_loss_counts[name]
+                    ).item()
+                    self._aux_loss_sums[name] -= self._aux_loss_sums[name]
+                    self._aux_loss_counts[name] = 0
+        elif "eval_loss" in logs:
+            for name in self._AUX_LOSS_KEYS.values():
+                if self._eval_aux_loss_counts[name] > 0:
+                    logs[f"eval_{name}"] = (
+                        self._eval_aux_loss_sums[name]
+                        / self._eval_aux_loss_counts[name]
+                    ).item()
+                    self._eval_aux_loss_sums[name] -= self._eval_aux_loss_sums[name]
+                    self._eval_aux_loss_counts[name] = 0
 
         if "eval_loss" in logs and self._eval_bc_targets:
             targets = torch.cat(self._eval_bc_targets).numpy()
