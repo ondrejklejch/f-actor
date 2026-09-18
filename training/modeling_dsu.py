@@ -150,6 +150,7 @@ class DSUModel(ModelInitializerLoader):
             dsu_labels,
             ts_labels,
             event_labels,
+            bc_eligible_labels,
         ) = get_input_embeds_and_labels(
             prompt_ids=input_ids,  # prompt ids
             prompt_att_mask=attention_mask,  # prompt attention_mask
@@ -221,7 +222,7 @@ class DSUModel(ModelInitializerLoader):
             logits_labels_pairs.append((None, event_labels, "events"))
 
         if self.use_bc_head and event_labels is not None:
-            bc_labels = (event_labels == EVENT_BC).long()
+            bc_labels = self._build_bc_labels(event_labels, bc_eligible_labels)
             logits_labels_pairs.append((None, bc_labels, "bc"))
 
         total_loss, c1_dsu_loss, c1_text_loss, c1_event_loss, c1_bc_loss = (
@@ -346,8 +347,17 @@ class DSUModel(ModelInitializerLoader):
                         reduction="none",
                     ).view_as(target)
 
-                per_conversation_loss = (per_token_loss * weights).sum(dim=[1, 2]) / weights.sum(dim=[1, 2]).clamp(min=1)
-                loss = per_conversation_loss.mean()
+                if loss_type == "bc":
+                    # Global average over every eligible frame in the batch,
+                    # matching bcmore's focal.sum() / n_valid, rather than a
+                    # per-conversation mean: bc-eligible frames are sparse and
+                    # uneven across conversations, so a per-conversation mean
+                    # would let a conversation with few eligible frames sway
+                    # the loss as much as one with many.
+                    loss = (per_token_loss * weights).sum() / weights.sum().clamp(min=1)
+                else:
+                    per_conversation_loss = (per_token_loss * weights).sum(dim=[1, 2]) / weights.sum(dim=[1, 2]).clamp(min=1)
+                    loss = per_conversation_loss.mean()
 
                 total_loss += loss
                 if loss_type == "dsus":
@@ -422,6 +432,49 @@ class DSUModel(ModelInitializerLoader):
         alpha_t = alpha[target]
         return -alpha_t * (1 - p_t).pow(gamma) * log_p_t
 
+    def _bc_eligible_from_text_stream(self, text_stream_ids_b):
+        """Per-frame bc-head eligibility label for one example: this speaker's
+        text stream is silence at that frame (system channel, index 0).
+
+        Derived from text_stream_ids_b -- already sliced/eos-padded by the
+        caller (get_input_embeds_and_labels[_padded]) -- rather than a
+        separate model input. This assumes n_delay_text_stream == 0 (true of
+        every config in this repo), so text_stream_ids_b stays at the same
+        undelayed frame alignment as event_ids_b; revisit if that changes.
+        """
+        return (text_stream_ids_b[0] == self.silence_pad_ids[0]).long()
+
+    @staticmethod
+    def _pad_bc_eligible_labels(labels_all_bc_eligible, padding_side=None):
+        """Batch-pad the per-example bc-eligibility labels collected via
+        _bc_eligible_from_text_stream, matching the [B, 1, L] convention
+        event labels use. Padded with 0 (ineligible)."""
+        if not labels_all_bc_eligible:
+            return None
+        kwargs = {} if padding_side is None else {"padding_side": padding_side}
+        return pad_sequence(
+            labels_all_bc_eligible, batch_first=True, padding_value=0, **kwargs
+        ).unsqueeze(1)
+
+    def _build_bc_labels(self, event_labels, bc_eligible_labels):
+        """bc_labels from event_labels, restricted to eligible frames (see
+        _bc_eligible_from_text_stream) so the head isn't trained as a hard
+        negative while this speaker is talking.
+
+        Ineligible frames get self.pad_token_id, reusing the existing
+        ignore-sentinel convention (`mask = labels_shifted !=
+        self.pad_token_id` in the loss loop) rather than a second one. A true
+        bc onset is never itself silence, so it would otherwise get wiped out
+        by that masking -- restored unconditionally afterward.
+        """
+        bc_labels = (event_labels == EVENT_BC).long()
+        if bc_eligible_labels is not None:
+            bc_labels = bc_labels.masked_fill(bc_eligible_labels == 0, self.pad_token_id)
+            bc_labels = torch.where(
+                event_labels == EVENT_BC, torch.ones_like(bc_labels), bc_labels
+            )
+        return bc_labels
+
     def check_vocab_bounds(self, prompt_ids, dsu_ids):
         if (prompt_ids >= self.text_vocab_size).any():
             raise ValueError("Prompt IDs contain out-of-vocabulary tokens")
@@ -471,6 +524,7 @@ class DSUModel(ModelInitializerLoader):
         labels_all_dsu_heads = []
         labels_all_text_streams = []
         labels_all_events = []
+        labels_all_bc_eligible = []
 
         for b in range(B):
             # prompt
@@ -560,6 +614,9 @@ class DSUModel(ModelInitializerLoader):
                     event_ids_b = torch.cat([event_ids_b, event_eos], dim=0)
                 labels_all_events.append(event_ids_b)
 
+            if event_ids is not None:
+                labels_all_bc_eligible.append(self._bc_eligible_from_text_stream(text_stream_ids_b))
+
             # Concatenate prompt and DSU embeddings
 
             all_concat_embeds.append(
@@ -606,12 +663,15 @@ class DSUModel(ModelInitializerLoader):
         else:
             labels_all_events = None
 
+        labels_all_bc_eligible = self._pad_bc_eligible_labels(labels_all_bc_eligible)
+
         return (
             padded_batch,
             attention_mask,
             labels_all_dsu_heads,
             labels_all_text_streams,
             labels_all_events,
+            labels_all_bc_eligible,
         )
 
     def get_input_embeds_and_labels_padded(
@@ -655,6 +715,7 @@ class DSUModel(ModelInitializerLoader):
         labels_all_dsu_heads = []
         labels_all_text_streams = []
         labels_all_events = []
+        labels_all_bc_eligible = []
         input_components = []
 
         for b in range(B):
@@ -735,6 +796,9 @@ class DSUModel(ModelInitializerLoader):
                     )
                     event_ids_b = torch.cat([event_ids_b, event_eos], dim=0)
                 labels_all_events.append(event_ids_b)
+
+            if event_ids is not None:
+                labels_all_bc_eligible.append(self._bc_eligible_from_text_stream(text_stream_ids_b))
 
             # Concatenate prompt and DSU embeddings
             input_components.append(
@@ -832,6 +896,10 @@ class DSUModel(ModelInitializerLoader):
         else:
             labels_events = None
 
+        labels_bc_eligible = self._pad_bc_eligible_labels(
+            labels_all_bc_eligible, padding_side="right"
+        )
+
         assert attention_mask.shape[-1] == padded_batch.shape[1]
         if labels_text_streams is not None:
 
@@ -843,6 +911,7 @@ class DSUModel(ModelInitializerLoader):
             labels_all_dsu_heads,
             labels_text_streams,
             labels_events,
+            labels_bc_eligible,
         )
 
     @torch.no_grad()
