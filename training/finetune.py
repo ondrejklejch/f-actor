@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from arguments.parse_arguments import parse_args
 from model import load_model
+from sklearn.metrics import average_precision_score
 from transformers import (
     EarlyStoppingCallback,
     Trainer,
@@ -114,6 +115,12 @@ class DSUTrainer(Trainer):
         self._bc_loss_count = 0
         self._eval_bc_loss_sum = torch.tensor(0.0, device=self.args.device)
         self._eval_bc_loss_count = 0
+        # Eval-only (see compute_loss): accumulated across an eval pass to
+        # compute a threshold-free PR-AUC once per evaluate() call, then
+        # cleared - unlike the losses above this isn't summed on the fly
+        # since average precision isn't separable across batches.
+        self._eval_bc_probs = []
+        self._eval_bc_targets = []
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         loss, outputs = super().compute_loss(
@@ -129,6 +136,11 @@ class DSUTrainer(Trainer):
             else:
                 self._eval_bc_loss_sum += bc_loss.detach()
                 self._eval_bc_loss_count += 1
+        if not model.training and outputs.get("c1_bc_probs") is not None:
+            # .float(): probs come out bf16/fp16 under mixed precision, which
+            # numpy() can't convert directly.
+            self._eval_bc_probs.append(outputs["c1_bc_probs"].float().cpu())
+            self._eval_bc_targets.append(outputs["c1_bc_targets"].float().cpu())
         return (loss, outputs) if return_outputs else loss
 
     def log(self, logs, *args, **kwargs):
@@ -143,6 +155,17 @@ class DSUTrainer(Trainer):
             ).item()
             self._eval_bc_loss_sum -= self._eval_bc_loss_sum
             self._eval_bc_loss_count = 0
+
+        if "eval_loss" in logs and self._eval_bc_targets:
+            targets = torch.cat(self._eval_bc_targets).numpy()
+            probs = torch.cat(self._eval_bc_probs).numpy()
+            # average_precision_score is undefined with only one class
+            # present - can happen on a small/debug eval set - so skip
+            # rather than let it raise or report a meaningless value.
+            if targets.min() != targets.max():
+                logs["eval_bc_pr_auc"] = average_precision_score(targets, probs)
+            self._eval_bc_probs = []
+            self._eval_bc_targets = []
         super().log(logs, *args, **kwargs)
 
     def create_optimizer(self):

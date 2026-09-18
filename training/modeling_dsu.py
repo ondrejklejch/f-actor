@@ -228,6 +228,10 @@ class DSUModel(ModelInitializerLoader):
         total_loss, c1_dsu_loss, c1_text_loss, c1_event_loss, c1_bc_loss = (
             None, None, None, None, None,
         )
+        # Per-eligible-frame BC probs/targets, for threshold-free metrics
+        # (e.g. PR-AUC) computed outside the model - not an accumulator like
+        # the losses above, just whatever the "bc" branch below sets once.
+        c1_bc_probs, c1_bc_targets = None, None
 
         if need_loss:
             total_loss, c1_dsu_loss, c1_text_loss, c1_event_loss, c1_bc_loss = (
@@ -325,6 +329,7 @@ class DSUModel(ModelInitializerLoader):
                             alpha=self.bc_focal_alpha,
                             gamma=self.bc_focal_gamma,
                         )
+                        bc_probs_full = torch.sigmoid(logits.squeeze(-1))
                     else:
                         # legacy head loaded from a checkpoint predating the
                         # binary loss: 2-way softmax, so fall back to the
@@ -340,6 +345,11 @@ class DSUModel(ModelInitializerLoader):
                             alpha=alpha,
                             gamma=self.bc_focal_gamma,
                         ).view_as(target)
+                        bc_probs_full = torch.softmax(logits, dim=-1)[..., 1]
+
+                    bc_mask = weights > 0
+                    c1_bc_probs = bc_probs_full[bc_mask].detach()
+                    c1_bc_targets = target[bc_mask].detach()
                 else:
                     per_token_loss = F.cross_entropy(
                         logits.reshape(-1, logits.shape[-1]),
@@ -380,6 +390,8 @@ class DSUModel(ModelInitializerLoader):
             "c1_dsu_loss": c1_dsu_loss,
             "c1_event_loss": c1_event_loss,
             "c1_bc_loss": c1_bc_loss,
+            "c1_bc_probs": c1_bc_probs,
+            "c1_bc_targets": c1_bc_targets,
             "ts_logits": ts_logits,
             "past_key_values": past_key_values,
             "audio_hidden_last": audio_hidden_padded[:, -1, :],
