@@ -110,6 +110,40 @@ class DSUTrainer(Trainer):
     def __init__(self, *args, depth_decoder_lr=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.depth_decoder_lr = depth_decoder_lr
+        self._bc_loss_sum = torch.tensor(0.0, device=self.args.device)
+        self._bc_loss_count = 0
+        self._eval_bc_loss_sum = torch.tensor(0.0, device=self.args.device)
+        self._eval_bc_loss_count = 0
+
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        loss, outputs = super().compute_loss(
+            model, inputs, return_outputs=True, **kwargs
+        )
+        bc_loss = outputs["c1_bc_loss"] if isinstance(outputs, dict) else outputs.get(
+            "c1_bc_loss"
+        )
+        if bc_loss is not None:
+            if model.training:
+                self._bc_loss_sum += bc_loss.detach()
+                self._bc_loss_count += 1
+            else:
+                self._eval_bc_loss_sum += bc_loss.detach()
+                self._eval_bc_loss_count += 1
+        return (loss, outputs) if return_outputs else loss
+
+    def log(self, logs, *args, **kwargs):
+        if "loss" in logs and self._bc_loss_count > 0:
+            # Train-step logging, identified by the "loss" key HF puts there.
+            logs["bc_loss"] = (self._bc_loss_sum / self._bc_loss_count).item()
+            self._bc_loss_sum -= self._bc_loss_sum
+            self._bc_loss_count = 0
+        elif "eval_loss" in logs and self._eval_bc_loss_count > 0:
+            logs["eval_bc_loss"] = (
+                self._eval_bc_loss_sum / self._eval_bc_loss_count
+            ).item()
+            self._eval_bc_loss_sum -= self._eval_bc_loss_sum
+            self._eval_bc_loss_count = 0
+        super().log(logs, *args, **kwargs)
 
     def create_optimizer(self):
         if self.optimizer is not None:
