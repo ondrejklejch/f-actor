@@ -26,6 +26,7 @@ class DSUModel(ModelInitializerLoader):
         self.text_padding_ids = []  # set externally once text-stream tokens exist
         self.silence_pad_weight = getattr(config, "silence_pad_weight", 1.0)
         self.silence_pad_ids = []  # set externally once text-stream tokens exist
+        self.bc_loss_weight = getattr(config, "bc_loss_weight", 1.0)
 
         # output-only event head: predicts, with no delay, whether the next
         # system-channel frame is an EPAD/BC/INTERRUPT/EOU marker. Unlike
@@ -369,14 +370,20 @@ class DSUModel(ModelInitializerLoader):
                     per_conversation_loss = (per_token_loss * weights).sum(dim=[1, 2]) / weights.sum(dim=[1, 2]).clamp(min=1)
                     loss = per_conversation_loss.mean()
 
-                total_loss += loss
                 if loss_type == "dsus":
+                    total_loss += loss
                     c1_dsu_loss += loss
                 elif loss_type == "text":
+                    total_loss += loss
                     c1_text_loss += loss
                 elif loss_type == "events":
+                    total_loss += loss
                     c1_event_loss += loss
                 elif loss_type == "bc":
+                    # c1_bc_loss stays unscaled so it's comparable to runs
+                    # with a different bc_loss_weight; only the backprop'd
+                    # total_loss is scaled.
+                    total_loss += loss * self.bc_loss_weight
                     c1_bc_loss += loss
                 else:
                     raise NotImplementedError

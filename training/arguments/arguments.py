@@ -17,6 +17,10 @@ class ModelArgs:
     first_codebook_weight: float = 1.0
     text_padding_weight: float = 1.0
     silence_pad_weight: float = 1.0
+    # Scales only the BC head's contribution to the backprop'd total loss -
+    # the reported bc_loss/eval_bc_loss stay unscaled so they're comparable
+    # across runs with different weights.
+    bc_loss_weight: float = 1.0
     use_depth_decoder: bool = False
     depth_decoder_pretrained_path: str = "sesame/csm-1b"
     # 0 (default) = depth decoder stays frozen for the whole run. Set > 0 to

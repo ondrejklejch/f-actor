@@ -73,6 +73,7 @@ def load_model(model_args, grad_acc_steps=1, logger=None, inference=False):
     config.first_codebook_weight = model_args.first_codebook_weight
     config.text_padding_weight = model_args.text_padding_weight
     config.silence_pad_weight = model_args.silence_pad_weight
+    config.bc_loss_weight = model_args.bc_loss_weight
     config.use_depth_decoder = model_args.use_depth_decoder
     config.depth_decoder_pretrained_path = model_args.depth_decoder_pretrained_path
     config.depth_decoder_unfreeze_after_steps = (
