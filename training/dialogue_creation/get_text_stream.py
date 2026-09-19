@@ -60,7 +60,8 @@ def create_text_stream(
 
     audio_duration = example["utterances"][-1]["end_time"]  # total time of conversation
 
-    frames_per_sec = n_dsu / audio_duration
+    #frames_per_sec = n_dsu / audio_duration
+    frames_per_sec = 12.5
 
     silence_pad_id = tokenizer.convert_tokens_to_ids(SILENCE_PAD)
     utterance_pad_id = tokenizer.convert_tokens_to_ids(UTTERANCE_PAD)
