@@ -4,6 +4,7 @@ from data_collator_dsu import DSUDataCollator
 from datasets import concatenate_datasets, load_dataset
 from dialogue_creation.get_prompt import build_prompt, build_prompt_personaplex
 from dialogue_creation.get_text_stream import adapt_to_text_stream
+from backchannel_relabel import relabel_backchannels
 from dialogue_creation.utils import (
     COLUMNS_TO_SELECT,
     SKIP_EXAMPLE_DICT_INFERENCE,
@@ -39,6 +40,11 @@ def load_speech_data(
     def tokenize_speech(example):
         n_overflow_words = 0
         skip_example = False
+        if data_args.relabel_backchannels:
+            example = {
+                **example,
+                "utterances": relabel_backchannels(example["utterances"]),
+            }
         dsu_s, dsu_u, dsu_mono, orig_dsu_length, role_to_speaker_map = prepare_dsu(
             example,
             num_dsus,

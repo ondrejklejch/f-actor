@@ -41,19 +41,16 @@ class ModelArgs:
     # None (the default) falls back to uniform weighting in DSUModel.__init__.
     event_focal_alpha: Optional[list] = field(default=None)
     # standalone binary backchannel head, independent of use_event_head: own
-    # Linear->GELU->Linear projection to a single logit (matching
-    # personaplex-fisher-lora-backchannel-v14b, context=0/no convolution),
-    # trained with binary sigmoid focal loss like bcmore's MoshiBackchannelHead.
+    # Linear->GELU->Linear projection to a single logit (context=0, no
+    # temporal convolution), trained with binary sigmoid focal loss.
     use_bc_head: bool = False
     bc_head_hidden: int = 256
     # class prior for the head's output bias at init (logit(bc_prior)), so it
-    # starts predicting the true positive rate instead of ~50%, same as
-    # bcmore's backchannel_prior. Only affects a freshly-initialized head, not
-    # one loaded from a checkpoint.
+    # starts predicting the true positive rate instead of ~50%. Only affects
+    # a freshly-initialized head, not one loaded from a checkpoint.
     bc_prior: float = 0.005
     bc_focal_gamma: float = 2.0
-    # scalar weight on the positive ("bc") class, same convention and default
-    # as bcmore's backchannel_focal_alpha.
+    # scalar weight on the positive ("bc") class.
     bc_focal_alpha: float = 0.9
 
     def __post_init__(self):
@@ -83,6 +80,10 @@ class DataArgs:
     prompt_style: str = "default"  # "default" or "personaplex"
     remove_start_silence: bool = False
     preprocessing_num_workers: Optional[int] = None
+    # Re-derive utterances[*].backchannels with a lexicon + floor-preserving-
+    # overlap detector (see training/backchannel_relabel.py) instead of
+    # trusting the dataset's own scripted labels.
+    relabel_backchannels: bool = False
 
 
 # Training arguments

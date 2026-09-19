@@ -52,12 +52,11 @@ class DSUModel(ModelInitializerLoader):
         self.bc_head_hidden = getattr(config, "bc_head_hidden", 256)
         self.bc_prior = getattr(config, "bc_prior", 0.005)
         self.bc_focal_gamma = getattr(config, "bc_focal_gamma", 2.0)
-        # scalar alpha weighting the positive ("bc") class, matching bcmore's
-        # binary sigmoid focal loss (default 0.9, same as
-        # personaplex-fisher-lora-backchannel-v14b). Used directly for the
-        # current single-logit head; the legacy two-way-softmax head (loaded
-        # from checkpoints predating the binary loss) derives its per-class
-        # weights from it as [1 - alpha, alpha].
+        # scalar alpha weighting the positive ("bc") class in the binary
+        # sigmoid focal loss. Used directly for the current single-logit
+        # head; the legacy two-way-softmax head (loaded from checkpoints
+        # predating the binary loss) derives its per-class weights from it
+        # as [1 - alpha, alpha].
         self.bc_focal_alpha = getattr(config, "bc_focal_alpha", 0.9)
 
         self.use_depth_decoder = getattr(config, "use_depth_decoder", False)
@@ -322,8 +321,7 @@ class DSUModel(ModelInitializerLoader):
                 elif loss_type == "bc":
                     if logits.shape[-1] == 1:
                         # current head: single logit, binary sigmoid focal
-                        # loss (arXiv:1708.02002), matching bcmore's
-                        # MoshiBackchannelHead._backchannel_loss_and_stats.
+                        # loss (arXiv:1708.02002).
                         per_token_loss = self._binary_focal_loss(
                             logits.squeeze(-1),
                             target.float(),
@@ -360,8 +358,7 @@ class DSUModel(ModelInitializerLoader):
 
                 if loss_type == "bc":
                     # Global average over every eligible frame in the batch,
-                    # matching bcmore's focal.sum() / n_valid, rather than a
-                    # per-conversation mean: bc-eligible frames are sparse and
+                    # rather than a per-conversation mean: bc-eligible frames are sparse and
                     # uneven across conversations, so a per-conversation mean
                     # would let a conversation with few eligible frames sway
                     # the loss as much as one with many.
@@ -423,8 +420,7 @@ class DSUModel(ModelInitializerLoader):
 
     @staticmethod
     def _binary_focal_loss(logits, target, alpha, gamma):
-        """Binary sigmoid focal loss (arXiv:1708.02002), matching bcmore's
-        MoshiBackchannelHead._backchannel_loss_and_stats.
+        """Binary sigmoid focal loss (arXiv:1708.02002).
 
         logits, target: same-shape float tensors; target in {0, 1} (or soft,
         anywhere in [0, 1]). alpha: scalar weight on the positive class.

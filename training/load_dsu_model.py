@@ -234,10 +234,9 @@ class ModelInitializerLoader:
     def init_bc_head(self):
         """Create the output-only backchannel head (own projection, not shared with event_head).
 
-        Linear(hidden -> 256) -> GELU -> Linear(256 -> 1), matching the
-        personaplex-fisher-lora-backchannel-v14b architecture (context=0, no temporal
-        convolution). Single output logit -- trained with binary sigmoid focal loss,
-        like bcmore's MoshiBackchannelHead, rather than 2-way softmax.
+        Linear(hidden -> 256) -> GELU -> Linear(256 -> 1) (context=0, no temporal
+        convolution). Single output logit -- trained with binary sigmoid focal loss
+        rather than 2-way softmax.
         """
         if not self.use_bc_head:
             return
@@ -253,8 +252,7 @@ class ModelInitializerLoader:
         torch.nn.init.xavier_uniform_(self.bc_head[2].weight)
         # Start the head predicting the class prior rather than ~50%, so early
         # steps aren't spent unlearning gross over-confidence on a rare
-        # positive class -- same trick as bcmore's
-        # MoshiBackchannelOutput.reset_prior_bias().
+        # positive class.
         prior = min(max(self.bc_prior, 1e-6), 1 - 1e-6)
         with torch.no_grad():
             self.bc_head[2].bias.fill_(math.log(prior / (1 - prior)))
