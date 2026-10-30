@@ -97,8 +97,9 @@ Before running the script, configure the following options at the bottom of the 
 - **Starting speaker** (which speaker begins the conversation)
 - **Narrative context** (background or setup for the dialogue)
 
-An example can be found in
-[`training/inference_example.py`](training/inference_example.py).
+Examples can be found in
+[`training/inference_example.py`](training/inference_example.py)
+or [`training/inference_example_mimi.py`](training/inference_example_mimi.py).
 
 To run the script, use:
 
