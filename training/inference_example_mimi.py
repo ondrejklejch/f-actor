@@ -18,7 +18,6 @@ def load_model():
         text_stream=True,
         audio_vocab_size=2049,
         use_speaker_embedding=True,
-        # the Mimi checkpoint predicts codebooks 2-8 with a depth decoder
         use_depth_decoder=True,
         depth_decoder_pretrained_path="sesame/csm-1b",
         depth_decoder_use_speaker_embedding=True,
@@ -67,7 +66,7 @@ def prepare_input(
         speaks_first=speaker2_start,
     )
 
-    with open("training/example_speakers/speaker_embeddings.json", "r") as f:
+    with open("training/example_speakers/speaker_embeddings_mimi.json", "r") as f:
         spk_to_emb = json.load(f)
 
     speaker_embed_speaker1 = np.array(spk_to_emb[speaker1.lower()])
@@ -170,24 +169,26 @@ def run_inference(
 
 def main():
     speakers = [
-        "Rebeka",
-        "Gweneth",
-        "Brian",
-        "Tom",
+        "Andy",
+        "Billie",
+        "Jimmie",
+        "David",
     ]
 
     ####################################### Adjust this ######################################
     speaker1 = speakers[0]
     speaker2 = speakers[1]
     narrative_speaker1 = (
-        f"You like {speakers[1]} a lot and you tell her that she is your best friend."
+        "Discussion about Food. "
+        "Which do each of you like better--eating at a restaurant or at home? Describe your perfect meal."
     )
     narrative_speaker2 = (
-        f"You like {speakers[0]} but you are not sure if she is your best friend."
+        "Discussion about Food. "
+        "Which do each of you like better--eating at a restaurant or at home? Describe your perfect meal."
     )
     speaker1_starts = True
     speaker2_starts = False
-    out_audio_file = "choose_your_name.wav" 
+    out_audio_file = "choose_your_name.wav"
 
     #########################################################################################
 
