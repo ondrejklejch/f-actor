@@ -238,8 +238,12 @@ def generate_outputs(
     )
 
 
-def prepare_inference(model_args, data_args, inference_args, logger):
-    model, tokenizer = load_model(model_args, logger=logger, inference=True)
+def prepare_inference(
+    model_args, data_args, inference_args, logger, precision="fp32"
+):
+    model, tokenizer = load_model(
+        model_args, logger=logger, inference=True, precision=precision
+    )
 
     text_stream_exists = model_args.text_stream or model_args.multi_text_stream
 
@@ -270,11 +274,11 @@ def prepare_inference(model_args, data_args, inference_args, logger):
     return model, tokenizer, text_stream_exists, dataset
 
 
-def eval(model_args, data_args, inference_args, logger):
+def eval(model_args, data_args, inference_args, logger, precision="fp32"):
     logger.info(f"Starting Inference with with:\n{inference_args}")
 
     model, tokenizer, text_stream_exists, dataset = prepare_inference(
-        model_args, data_args, inference_args, logger
+        model_args, data_args, inference_args, logger, precision=precision
     )
     # calculate ppl
     ppls, data_indices, meta = compute_perplexity(
@@ -367,7 +371,9 @@ def eval(model_args, data_args, inference_args, logger):
 
 
 def main():
-    model_args, data_args, _, inference_args = parse_args(include_inference=True)
+    model_args, data_args, training_args, inference_args = parse_args(
+        include_inference=True
+    )
 
     os.makedirs(inference_args.inf_output_dir, exist_ok=True)
 
@@ -383,7 +389,7 @@ def main():
         force=True,
     )
     logger = logging.getLogger(__name__)
-    eval(model_args, data_args, inference_args, logger)
+    eval(model_args, data_args, inference_args, logger, precision=training_args.precision)
 
 
 if __name__ == "__main__":

@@ -35,7 +35,12 @@ def add_new_tokens(model, tokenizer, new_tokens, new_special_tokens, logger=None
         logger.info("Resized token embeddings.")
 
 
-def load_model(model_args, grad_acc_steps=1, logger=None, inference=False):
+PRECISION_TO_DTYPE = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
+
+
+def load_model(
+    model_args, grad_acc_steps=1, logger=None, inference=False, precision="fp32"
+):
 
     model_id = model_args.model_id
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -92,6 +97,7 @@ def load_model(model_args, grad_acc_steps=1, logger=None, inference=False):
     model = model_cls.from_pretrained(
         model_id,
         config=config,
+        torch_dtype=PRECISION_TO_DTYPE[precision],
     ).to(device)
 
     if tokenizer.pad_token_id < model_args.audio_vocab_size:

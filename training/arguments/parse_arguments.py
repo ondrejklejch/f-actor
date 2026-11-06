@@ -25,8 +25,11 @@ def parse_args(include_inference: bool = False):
                     "--precision",
                     type=str,
                     choices=["fp32", "fp16", "bf16"],
-                    default=field_def.default,
-                    help="Mixed precision mode (fp32, fp16, bf16)",
+                    # training defaults to mixed-precision bf16; inference keeps
+                    # loading the model in fp32 unless asked otherwise
+                    default="fp32" if include_inference else field_def.default,
+                    help="Precision (fp32, fp16, bf16). For inference this is the "
+                    "dtype the model is loaded in (default: fp32)",
                 )
                 continue
 
