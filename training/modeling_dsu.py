@@ -1,3 +1,5 @@
+from functools import partial
+
 import torch
 import torch.nn.functional as F
 from backchannel_decoding import NullLogitsProcessor
@@ -120,6 +122,7 @@ class DSUModel(ModelInitializerLoader):
         need_loss=True,
         past_key_values=None,
         use_cache=None,
+        running_attention_mask=None,
         **kwargs,
     ):
 
@@ -138,6 +141,16 @@ class DSUModel(ModelInitializerLoader):
             if inference
             else self.get_input_embeds_and_labels
         )
+        if (
+            inference
+            and use_cache
+            and running_attention_mask is not None
+            and len(past_key_values) > 0
+        ):  # KV cache holds all earlier frames: embed only the newest one
+            get_input_embeds_and_labels = partial(
+                self.get_last_frame_inputs,
+                running_attention_mask=running_attention_mask,
+            )
 
         (
             prompt_dsu_input_embeds,
@@ -353,6 +366,7 @@ class DSUModel(ModelInitializerLoader):
             "c1_bc_loss": c1_bc_loss,
             "ts_logits": ts_logits,
             "past_key_values": past_key_values,
+            "attention_mask": prompt_dsu_attention_mask,
             "audio_hidden_last": audio_hidden_padded[:, -1, :],
             # unlike c1_bc_loss above (only populated when event_labels is
             # available, i.e. during training), this is always populated
@@ -377,6 +391,24 @@ class DSUModel(ModelInitializerLoader):
         p_t = log_p_t.exp()
         alpha_t = alpha[target]
         return -alpha_t * (1 - p_t).pow(gamma) * log_p_t
+
+    def get_last_frame_inputs(
+        self,
+        dsu_ids,
+        text_stream_ids,
+        running_attention_mask,
+        **unused,  # same signature as get_input_embeds_and_labels_padded
+    ):
+        """Cached-decoding replacement for get_input_embeds_and_labels_padded:
+        embeds only the newest frame and extends the running mask by one
+        instead of rebuilding the whole sequence on every step."""
+        embeds = torch.stack(
+            [self.audio_embeds[h](dsu_ids[:, h, -1]) for h in range(len(self.audio_embeds))]
+        ).sum(dim=0)
+        if self.text_stream or self.multi_text_stream:
+            embeds = embeds + self.get_input_embeddings()(text_stream_ids[:, :, -1]).sum(1)
+        mask = F.pad(running_attention_mask, (0, 1), value=1)
+        return embeds.unsqueeze(1).to(self.model.dtype), mask, None, None, None
 
     def check_vocab_bounds(self, prompt_ids, dsu_ids):
         if (prompt_ids >= self.text_vocab_size).any():
@@ -1023,11 +1055,12 @@ class DSUModel(ModelInitializerLoader):
 
             generated_text = torch.cat([text_context, generated_text], dim=-1)
 
+        running_mask = None
         for step in range(start_step, max_length):
             # print(f"{step-start_step}/{max_length-use_speaker_sample}")
 
-            dsu_ids_step = generated_dsu[:, :, :step].clone()  # [B, H, L_so_far]
-            text_ids_step = generated_text[:, :, :step].clone()
+            dsu_ids_step = generated_dsu[:, :, :step]  # [B, H, L_so_far]
+            text_ids_step = generated_text[:, :, :step]
 
             outputs = self.forward(
                 input_ids=input_ids,  # prompt ids
@@ -1039,10 +1072,12 @@ class DSUModel(ModelInitializerLoader):
                 spk_emb=spk_emb,
                 past_key_values=past_key_values,
                 use_cache=True,
+                running_attention_mask=running_mask,
                 **kwargs,
             )
 
             past_key_values = outputs["past_key_values"]
+            running_mask = outputs["attention_mask"]
 
             if step >= n_delay_audio_stream:
                 generated_dsu[:, :self.num_dsus, step] = self.sample_dsu_tokens(
