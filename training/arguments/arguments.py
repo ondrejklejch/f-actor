@@ -117,3 +117,4 @@ class InferenceArgs:
     use_speaker_sample: int = 0
     talk_to_itself: bool = False
     return_gold: bool = False
+    batch_size: int = 1  # examples generated in parallel (num_dsus > 0 only)

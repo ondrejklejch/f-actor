@@ -122,6 +122,7 @@ def generate_outputs(
     n_delay_audio_stream=0,
     talk_to_itself=False,
     return_gold=False,
+    batch_size=1,
 ):
     """Generate texts for all DSU heads. Returns list of lists: [head][examples]."""
 
@@ -132,7 +133,86 @@ def generate_outputs(
     generated_text_streams = make_lists(num_output_texts)
     ref_text_streams = make_lists(num_output_texts)
 
-    for example in tqdm(dataset, desc="Generate Output"):
+    assert batch_size == 1 or model.num_dsus > 0, "batch_size > 1 needs num_dsus > 0"
+
+    def pad_stack(seqs):  # list of [S, T_i] -> [N, S, T_max], right-padded
+        out = torch.full(
+            (len(seqs), len(seqs[0]), max(len(x[0]) for x in seqs)),
+            tokenizer.pad_token_id,
+            dtype=torch.long,
+        )
+        for n, x in enumerate(seqs):
+            out[n, :, : len(x[0])] = torch.tensor(x, dtype=torch.long)
+        return out.cuda()
+
+    def generate_batches():
+        """Yields (example, generated_ids, input_len), one per example."""
+        for start in range(0, len(dataset), batch_size):
+            examples = [
+                dataset[i] for i in range(start, min(start + batch_size, len(dataset)))
+            ]
+
+            # rows: [speaker-1 of every example; speaker-2 of every example]
+            prompt = [e["input_text"] for e in examples]
+            spk_emb = [e["spk_emb1"] for e in examples]
+            if talk_to_itself:  # also give prompt + speaker embed to second speaker
+                prompt += [e["prompt_s2"] for e in examples]
+                spk_emb += [e["spk_emb2"] for e in examples]
+
+            inputs = tokenizer(
+                prompt,
+                return_tensors="pt",
+                max_length=max_length,
+                truncation=True,
+                padding=True,
+            )
+
+            input_ids = inputs.input_ids.cuda()
+            attention_mask = inputs.attention_mask.cuda()
+            dsu_sample = pad_stack([e["reference_text"] for e in examples])
+            text_sample = (
+                pad_stack([e["reference_text_stream"] for e in examples])
+                if text_stream_exists
+                else None
+            )
+
+            if not return_gold:
+                with torch.no_grad():
+                    generated = model.generate(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        max_length=max_length,
+                        do_sample=do_sample,
+                        temperature=temperature,
+                        top_k=top_k,
+                        top_p=top_p,
+                        pad_token_id=tokenizer.eos_token_id,
+                        eos_token_id=tokenizer.eos_token_id,
+                        tokenizer=tokenizer,
+                        stop_strings=["<|EOS|>"],
+                        use_speaker_sample=use_speaker_sample,
+                        dsu_sample=dsu_sample,
+                        text_sample=text_sample,
+                        n_delay_text_stream=n_delay_text_stream,
+                        n_delay_audio_stream=n_delay_audio_stream,
+                        talk_to_itself=talk_to_itself,
+                        spk_emb=spk_emb,
+                        return_batch=True,
+                    )
+                if model.num_dsus < 1:  # text-only model returns the token ids
+                    generated = [generated]
+            else:
+                generated = [
+                    (e["reference_text"], e.get("reference_text_stream"))
+                    for e in examples
+                ]
+
+            for example, generated_ids in zip(examples, generated):
+                yield example, generated_ids, input_ids.shape[1]
+
+    for example, generated_ids, input_len in tqdm(
+        generate_batches(), total=len(dataset), desc="Generate Output"
+    ):
 
         ref_texts = example["reference_text"]
         if text_stream_exists:
@@ -141,61 +221,6 @@ def generate_outputs(
                 .unsqueeze(0)
                 .cuda()
             )
-
-        # Tokenize main input
-        prompt = [example["input_text"]]
-        spk_emb = [example["spk_emb1"]]
-
-        if talk_to_itself:  # also give prompt + speaker embed to second speaker
-            prompt.append(example["prompt_s2"])
-            spk_emb.append(example["spk_emb2"])
-
-        # breakpoint()
-        inputs = tokenizer(
-            prompt,
-            return_tensors="pt",
-            max_length=max_length,
-            truncation=True,
-            padding=True,
-        )
-
-        input_ids = inputs.input_ids.cuda()
-        attention_mask = inputs.attention_mask.cuda()
-
-        dsu_ids_list = [
-            torch.tensor(x, dtype=torch.long).unsqueeze(0).cuda() for x in ref_texts
-        ]
-
-        dsu_sample = torch.stack(dsu_ids_list, dim=1).cuda()
-        text_sample = ref_text_stream if text_stream_exists else None
-
-        if not return_gold:
-            with torch.no_grad():
-                generated_ids = model.generate(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    max_length=max_length,
-                    do_sample=do_sample,
-                    temperature=temperature,
-                    top_k=top_k,
-                    top_p=top_p,
-                    pad_token_id=tokenizer.eos_token_id,
-                    eos_token_id=tokenizer.eos_token_id,
-                    tokenizer=tokenizer,
-                    stop_strings=["<|EOS|>"],
-                    use_speaker_sample=use_speaker_sample,
-                    dsu_sample=dsu_sample,
-                    text_sample=text_sample,
-                    n_delay_text_stream=n_delay_text_stream,
-                    n_delay_audio_stream=n_delay_audio_stream,
-                    talk_to_itself=talk_to_itself,
-                    spk_emb=spk_emb,
-                )
-
-            input_len = input_ids.shape[1]
-
-        else:
-            generated_ids = (dsu_sample[0].tolist(), text_sample[0].tolist())
 
         if model.num_dsus > 0:
             generated_dsu_ids, generated_text_ids = generated_ids
@@ -309,6 +334,7 @@ def eval(model_args, data_args, inference_args, logger, precision="fp32"):
         n_delay_audio_stream=data_args.n_delay_audio_stream,
         talk_to_itself=inference_args.talk_to_itself,
         return_gold=inference_args.return_gold,
+        batch_size=inference_args.batch_size,
     )
 
     # Compute ROUGE per head + average

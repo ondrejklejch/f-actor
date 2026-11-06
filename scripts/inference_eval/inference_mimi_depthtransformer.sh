@@ -15,6 +15,8 @@ WORD_ALIGNMENT=true
 # inference
 MAX_LENGTH=1024
 INFERENCE_SUBSET=100
+BATCH_SIZE=32
+PRECISION=bf16
 DO_SAMPLE=true
 TEMPERATURE=0.8
 TOP_K=40
@@ -53,6 +55,8 @@ if [ "$GENERATE" = true ]; then
       --inf_output_dir "$INFERENCE_DIR" \
       --max_length "$MAX_LENGTH" \
       --inference_on_subset "$INFERENCE_SUBSET" \
+      --batch_size "$BATCH_SIZE" \
+      --precision "$PRECISION" \
       --num_dsus "$NUM_DSUS" \
       $(flag_if_true $DO_SAMPLE "--do_sample") \
       --temperature "$TEMPERATURE" \

@@ -947,6 +947,10 @@ class DSUModel(ModelInitializerLoader):
         **kwargs,
     ):
 
+        # False (default): return the first example's (dsu, text) as before;
+        # True: return a list with one (dsu, text) pair per example in the batch
+        return_batch = kwargs.pop("return_batch", False)
+
         if self.num_dsus < 1:
             return super().generate(
                 input_ids=input_ids,
@@ -1016,10 +1020,13 @@ class DSUModel(ModelInitializerLoader):
         )
 
         def interleave_halves(x):
+            # rows are [speaker-1 view of every example; speaker-2 view of every
+            # example], so row i is paired with row i + n_examples
             half = x.shape[1] // 2
+            n = x.shape[0] // 2
             out = x.clone()
-            out[0::2, half:] = x[1::2, :half].clone()
-            out[1::2, half:] = x[0::2, :half].clone()
+            out[:n, half:] = x[n:, :half]
+            out[n:, half:] = x[:n, :half]
             return out
 
         len_context = use_speaker_sample
@@ -1027,7 +1034,7 @@ class DSUModel(ModelInitializerLoader):
         # define max_length, start step and last step
         max_length = max_length + len_context
         start_step = len_context
-        last_step = -1
+        last_step = torch.full((B,), -1, device=input_ids.device)  # per example
 
         dsu_context = dsu_sample[:, :, :len_context]
         generated_dsu = torch.cat([dsu_context, generated_dsu], dim=-1)
@@ -1048,7 +1055,9 @@ class DSUModel(ModelInitializerLoader):
         if self.num_text_streams > 0:
             if talk_to_itself:
                 # Take first 2 text streams from context
-                text_context = text_sample[:, :2, :len_context].permute(1, 0, 2)
+                text_context = torch.cat(
+                    [text_sample[:, i : i + 1, :len_context] for i in range(2)], dim=0
+                )
                 generated_text = torch.cat([generated_text, generated_text], dim=0)
             else:
                 text_context = text_sample[:, : self.num_text_streams, :len_context]
@@ -1110,27 +1119,26 @@ class DSUModel(ModelInitializerLoader):
                 if self.num_text_streams > 1:
                     generated_text = interleave_halves(generated_text)
 
-            # EOS in dsus
-            if torch.isin(generated_dsu[:, :, step], audio_stop_ids).any():
-                last_step = step + 1
+            # EOS in dsus or text, in either speaker's row of an example
+            hit = torch.isin(generated_dsu[:, :, step], audio_stop_ids).any(dim=1)
+            if self.num_text_streams > 1:
+                hit |= torch.isin(generated_text[:, :, step], text_stop_ids).any(dim=1)
+            if talk_to_itself:
+                hit = hit[:B] | hit[B:]
+            last_step = torch.where((last_step < 0) & hit, step + 1, last_step)
+            if (last_step >= 0).all():
                 break
 
-            # EOS in text
-            if (
-                self.num_text_streams > 1
-                and torch.isin(generated_text[:, :, step], text_stop_ids).any()
-            ):
-                last_step = step + 1
-                break
-
-        # never do batch inference
-        out_dsu = generated_dsu[0, :, :last_step].tolist()
-        out_text = (
-            generated_text[:, 0, :last_step].tolist()
-            if self.num_text_streams > 0
-            else None
-        )
-        return out_dsu, out_text
+        last_step = last_step.tolist()
+        results = []
+        for i in range(B):
+            out_dsu = generated_dsu[i, :, : last_step[i]].tolist()
+            out_text = None
+            if self.num_text_streams > 0:
+                rows = [i, i + B] if talk_to_itself else [i]
+                out_text = generated_text[rows, 0, : last_step[i]].tolist()
+            results.append((out_dsu, out_text))
+        return results if return_batch else results[0]
 
 
 class DSULlama(DSUModel, LlamaForCausalLM):
